@@ -1,0 +1,129 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BIN_DIR="$PROJECT_DIR/bin"
+DAEMON="${CH347_DAEMON:-$SCRIPT_DIR/ch347_dirty_usb_x11_daemon.sh}"
+FPS_FILE="${CH347_FPS_FILE:-$PROJECT_DIR/ch347/fps.env}"
+if [ -f "$FPS_FILE" ]; then
+    saved_fps="$(sed -n 's/^FPS=//p' "$FPS_FILE" | tail -1)"
+    saved_xcap_fps="$(sed -n 's/^XCAP_MAX_FPS=//p' "$FPS_FILE" | tail -1)"
+    FPS="${FPS:-${saved_fps:-30}}"
+    XCAP_MAX_FPS="${XCAP_MAX_FPS:-${saved_xcap_fps:-$FPS}}"
+fi
+CAL_FILE_DEFAULT="$PROJECT_DIR/ch347/touch_calibration.env"
+if [ "${CH347_TOUCH:-0}" = "1" ] && [ "${CH347_TOUCH_CALIBRATE:-0}" != "1" ] && [ -f "${CH347_TOUCH_CAL_FILE:-$CAL_FILE_DEFAULT}" ] && [ -z "${CH347_TOUCH_X_MIN+x}" ]; then
+    set -a
+    . "${CH347_TOUCH_CAL_FILE:-$CAL_FILE_DEFAULT}"
+    set +a
+fi
+
+
+RUN_DIR="${RUN_DIR:-/tmp/ch347_dirty_usb_x11}"
+PID_FILE="$RUN_DIR/pids"
+LOG_FILE="$RUN_DIR/live.log"
+
+mkdir -p "$RUN_DIR"
+
+printf '%s\n' "${CH347_TOUCH_MODE:-touch}" > "${CH347_TOUCH_MODE_FILE:-$RUN_DIR/touch_mode}"
+
+if [ -f "$PID_FILE" ]; then
+    while read -r pid; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "Already running. Stop first: $SCRIPT_DIR/stop_ch347_dirty_usb_x11.sh" >&2
+            exit 1
+        fi
+    done < "$PID_FILE"
+fi
+
+rm -f "$PID_FILE" "$LOG_FILE"
+touch "$LOG_FILE"
+
+nohup env \
+    CH347_CLOCK="${CH347_CLOCK:-1}" \
+    CAPTURE="${CAPTURE:-xdamage}" \
+    XCAP_MAX_FPS="${XCAP_MAX_FPS:-${FPS:-30}}" \
+    XCAP_IDLE_FPS="${XCAP_IDLE_FPS:-}" \
+    XSERVER="${XSERVER:-Xorg}" \
+    XORG_CONFIG="${XORG_CONFIG:-$PROJECT_DIR/xorg/xorg.conf}" \
+    XCAP_DEBUG="${XCAP_DEBUG:-0}" \
+    XCAP_OUTPUT="${XCAP_OUTPUT:-frame}" \
+    XCAP_FPS_FILE="$FPS_FILE" \
+    PACKET_US="${PACKET_US:-0}" \
+    PIXFMT="${PIXFMT:-rgb565be}" \
+    FPS="${FPS:-30}" \
+    MAX_FRAMES="${MAX_FRAMES:-0}" \
+    DEPTH="${DEPTH:-8}" \
+    WINDOW_EACH_FRAME=0 \
+    DRAIN_US=0 \
+    ACK_READS=0 \
+    DEBUG="${DEBUG:-0}" \
+    GATED="${GATED:-0}" \
+    RENDER_MS="${RENDER_MS:-30}" \
+    APP="${APP:-glxgears}" \
+    WM="${WM:-openbox}" \
+    DISPLAY_ID="${DISPLAY_ID:-:24}" \
+    WIDTH="${WIDTH:-320}" \
+    HEIGHT="${HEIGHT:-480}" \
+    PROJECT_DIR="$PROJECT_DIR" \
+    RUN_DIR="$RUN_DIR" \
+    CH347_SINK="${CH347_SINK:-$BIN_DIR/ch347_dirty_usb_sink}" \
+    CH347_FULL_AREA_PCT="${CH347_FULL_AREA_PCT:-40}" \
+    CH347_MAX_RECTS="${CH347_MAX_RECTS:-1}" \
+    CH347_STALE_MS="${CH347_STALE_MS:-0}" \
+    CH347_STALE_BUDGET="${CH347_STALE_BUDGET:-60}" \
+    CH347_HOLD_CS="${CH347_HOLD_CS:-1}" \
+    CH347_LATEST_ONLY="${CH347_LATEST_ONLY:-1}" \
+    CH347_URB_TIMEOUT_MS="${CH347_URB_TIMEOUT_MS:-1500}" \
+    CH347_USB_DEBUG="${CH347_USB_DEBUG:-0}" \
+    CH347_GPIO_OVERLAY="${CH347_GPIO_OVERLAY:-0}" \
+    CH347_GPIO_OVERLAY_MS="${CH347_GPIO_OVERLAY_MS:-200}" \
+    CH347_RESTART_ON_FAIL="${CH347_RESTART_ON_FAIL:-1}" \
+    CH347_RESTART_DELAY_SEC="${CH347_RESTART_DELAY_SEC:-2}" \
+    CH347_RESTART_MAX="${CH347_RESTART_MAX:-3}" \
+    CH347_TOUCH="${CH347_TOUCH:-0}" \
+    CH347_TOUCH_USE_IRQ="${CH347_TOUCH_USE_IRQ:-0}" \
+    CH347_TOUCH_MODE="${CH347_TOUCH_MODE:-touch}" \
+    CH347_TOUCH_MODE_FILE="${CH347_TOUCH_MODE_FILE:-$RUN_DIR/touch_mode}" \
+    CH347_CURSOR="${CH347_CURSOR:-1}" \
+    CH347_TOUCH_CALIBRATE="${CH347_TOUCH_CALIBRATE:-0}" \
+    CH347_TOUCH_CAL_FILE="${CH347_TOUCH_CAL_FILE:-$PROJECT_DIR/ch347/touch_calibration.env}" \
+    CH347_TOUCH_CAL_EXIT="${CH347_TOUCH_CAL_EXIT:-1}" \
+    CH347_TOUCH_CAL_MARGIN="${CH347_TOUCH_CAL_MARGIN:-32}" \
+    CH347_TOUCH_POLL_MS="${CH347_TOUCH_POLL_MS:-32}" \
+    CH347_TOUCH_SWAP_XY="${CH347_TOUCH_SWAP_XY:-0}" \
+    CH347_TOUCH_INVERT_X="${CH347_TOUCH_INVERT_X:-0}" \
+    CH347_TOUCH_INVERT_Y="${CH347_TOUCH_INVERT_Y:-0}" \
+    CH347_TOUCH_X_MIN="${CH347_TOUCH_X_MIN:-200}" \
+    CH347_TOUCH_X_MAX="${CH347_TOUCH_X_MAX:-3900}" \
+    CH347_TOUCH_Y_MIN="${CH347_TOUCH_Y_MIN:-200}" \
+    CH347_TOUCH_Y_MAX="${CH347_TOUCH_Y_MAX:-3900}" \
+    CH347_TOUCH_WIDTH="${CH347_TOUCH_WIDTH:-320}" \
+    CH347_TOUCH_HEIGHT="${CH347_TOUCH_HEIGHT:-480}" \
+    CH347_TOUCH_MOVE_THRESH="${CH347_TOUCH_MOVE_THRESH:-2}" \
+    CH347_TOUCH_JUMP_THRESH="${CH347_TOUCH_JUMP_THRESH:-160}" \
+    CH347_TOUCH_FILTER_WEIGHT="${CH347_TOUCH_FILTER_WEIGHT:-1}" \
+    CH347_TOUCH_MAX_ERRORS="${CH347_TOUCH_MAX_ERRORS:-8}" \
+    CH347_TOUCH_CLOCK="${CH347_TOUCH_CLOCK:-5}" \
+    CH347_TOUCH_RELEASE_SAMPLES="${CH347_TOUCH_RELEASE_SAMPLES:-3}" \
+    CH347_TOUCH_CAL_SAMPLES="${CH347_TOUCH_CAL_SAMPLES:-4}" \
+    CH347_TOUCH_Z_MIN="${CH347_TOUCH_Z_MIN:-50}" \
+    CH347_TOUCH_PRESSURE_MIN="${CH347_TOUCH_PRESSURE_MIN:-${CH347_TOUCH_Z_MIN:-50}}" \
+    CH347_TOUCH_Z_STRICT="${CH347_TOUCH_Z_STRICT:-1}" \
+    CH347_TOUCH_DEBUG="${CH347_TOUCH_DEBUG:-0}" \
+    CH347_TOUCH_DISABLE_ON_ERRORS="${CH347_TOUCH_DISABLE_ON_ERRORS:-0}" \
+    LD_LIBRARY_PATH="$PROJECT_DIR/ch347:${LD_LIBRARY_PATH:-}" \
+    setsid "$DAEMON" >>"$LOG_FILE" 2>&1 &
+DAEMON_PID="$!"
+
+sleep 2
+if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+    echo "dirty USB X11 CH347 stream failed to start" >&2
+    tail -80 "$LOG_FILE" >&2 || true
+    exit 1
+fi
+
+echo "started dirty USB X11 CH347 stream pid=$DAEMON_PID"
+echo "log: $LOG_FILE"
+echo "stop: $SCRIPT_DIR/stop_ch347_dirty_usb_x11.sh"
