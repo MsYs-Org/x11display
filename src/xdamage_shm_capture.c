@@ -20,9 +20,11 @@
 #include <X11/extensions/Xdamage.h>
 
 #include "frame_mailbox.h"
+#include "frame_rotation.h"
 
 static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t reload_requested;
+static volatile sig_atomic_t force_refresh_requested;
 static struct frame_mailbox_header *signal_mailbox;
 
 struct mask_info {
@@ -40,11 +42,13 @@ struct rect {
 
 static void handle_signal(int sig)
 {
-    if (sig != SIGUSR1 && signal_mailbox)
+    if (sig != SIGUSR1 && sig != SIGUSR2 && signal_mailbox)
         atomic_store_explicit(&signal_mailbox->producer_alive, 0,
                 memory_order_release);
     if (sig == SIGUSR1)
         reload_requested = 1;
+    else if (sig == SIGUSR2)
+        force_refresh_requested = 1;
     else
         stop_requested = 1;
 }
@@ -83,28 +87,36 @@ static double env_double(const char *name, double def)
     return atof(v);
 }
 
-static double read_fps_file(const char *path, double def)
+static void read_fps_file(const char *path, double current_max_fps,
+        double current_idle_fps, double *max_fps_out, double *idle_fps_out)
 {
     char line[128];
     FILE *fp;
-    double fps = def;
+    double max_fps = current_max_fps;
+    double idle_fps = current_idle_fps;
 
+    *max_fps_out = current_max_fps;
+    *idle_fps_out = current_idle_fps;
     if (!path || !*path)
-        return def;
+        return;
     fp = fopen(path, "r");
     if (!fp)
-        return def;
+        return;
     while (fgets(line, sizeof(line), fp)) {
         double value;
 
         if (sscanf(line, "XCAP_MAX_FPS=%lf", &value) == 1 ||
                 sscanf(line, "FPS=%lf", &value) == 1) {
             if (value > 0.0)
-                fps = value;
+                max_fps = value;
+        } else if (sscanf(line, "XCAP_IDLE_FPS=%lf", &value) == 1) {
+            if (value >= 0.0)
+                idle_fps = value;
         }
     }
     fclose(fp);
-    return fps;
+    *max_fps_out = max_fps;
+    *idle_fps_out = idle_fps;
 }
 
 static void init_mask(struct mask_info *mi, unsigned long mask)
@@ -436,6 +448,8 @@ int main(int argc, char **argv)
     const char *output_mode = getenv("XCAP_OUTPUT");
     const char *mailbox_path = getenv("XCAP_MAILBOX");
     const char *fps_file = getenv("XCAP_FPS_FILE");
+    const char *rotation_text = getenv("XCAP_ROTATION");
+    enum frame_rotation rotation;
     int output_rects = !output_mode || !strcmp(output_mode, "rects");
     Display *dpy;
     int screen;
@@ -451,6 +465,9 @@ int main(int argc, char **argv)
     XImage *img;
     XImage *fallback_img = NULL;
     uint8_t *out;
+    uint8_t *capture_buffer;
+    uint8_t *last_frame = NULL;
+    int have_last_frame = 0;
     struct mask_info rm;
     struct mask_info gm;
     struct mask_info bm;
@@ -459,6 +476,7 @@ int main(int argc, char **argv)
     double last_control_poll = -1.0e9;
     double last_out = -1.0e9;
     unsigned int frames = 0;
+    uint64_t published_frames = 0;
     int dirty = 1;
     int have_pending = 0;
     struct rect pending = {0, 0, 0, 0};
@@ -466,11 +484,25 @@ int main(int argc, char **argv)
     void *mailbox = NULL;
     size_t mailbox_size = 0;
     size_t frame_bytes = (size_t)width * height * 2;
+    unsigned int output_width;
+    unsigned int output_height;
 
     if (!display_name || !*display_name)
         display_name = ":24";
     if (!width || !height) {
         fprintf(stderr, "xdamage_capture invalid size %ux%u\n", width, height);
+        return 1;
+    }
+    if (!frame_rotation_parse(rotation_text, &rotation)) {
+        fprintf(stderr, "xdamage_capture invalid rotation %s\n",
+                rotation_text ? rotation_text : "");
+        return 1;
+    }
+    frame_rotation_output_size(rotation, width, height, &output_width,
+            &output_height);
+    if (output_rects && rotation != FRAME_ROTATION_NORMAL) {
+        fprintf(stderr,
+                "xdamage_capture rotated output requires XCAP_OUTPUT=frame\n");
         return 1;
     }
     if (max_fps <= 0.0)
@@ -484,6 +516,7 @@ int main(int argc, char **argv)
     signal(SIGTERM, handle_signal);
     signal(SIGPIPE, handle_signal);
     signal(SIGUSR1, handle_signal);
+    signal(SIGUSR2, handle_signal);
 
     dpy = XOpenDisplay(display_name);
     if (!dpy) {
@@ -498,9 +531,12 @@ int main(int argc, char **argv)
     depth = DefaultDepth(dpy, screen);
     have_damage = XDamageQueryExtension(dpy, &damage_event, &damage_error);
     if (have_damage) {
-        XSelectInput(dpy, root, SubstructureNotifyMask | StructureNotifyMask |
-                PropertyChangeMask);
         damage = XDamageCreate(dpy, root, XDamageReportNonEmpty);
+    } else {
+        /* Structural events are only a compatibility fallback.  Property
+         * notifications are not pixels and can be generated continuously by
+         * layout policy, so they must never turn into a full-screen capture. */
+        XSelectInput(dpy, root, SubstructureNotifyMask | StructureNotifyMask);
     }
 
     use_shm = XShmQueryExtension(dpy);
@@ -523,13 +559,35 @@ int main(int argc, char **argv)
         XCloseDisplay(dpy);
         return 1;
     }
+    capture_buffer = rotation == FRAME_ROTATION_NORMAL ? out :
+        malloc(frame_bytes);
+    if (!capture_buffer) {
+        fprintf(stderr, "xdamage_capture rotation buffer alloc failed\n");
+        free(out);
+        XCloseDisplay(dpy);
+        return 1;
+    }
+    if (!output_rects) {
+        last_frame = malloc(frame_bytes);
+        if (!last_frame) {
+            fprintf(stderr, "xdamage_capture previous-frame alloc failed\n");
+            if (capture_buffer != out)
+                free(capture_buffer);
+            free(out);
+            XCloseDisplay(dpy);
+            return 1;
+        }
+    }
 
     if (mailbox_path && *mailbox_path &&
-            mailbox_open(mailbox_path, width, height, frame_bytes,
+            mailbox_open(mailbox_path, output_width, output_height, frame_bytes,
                 &mailbox, &mailbox_size) < 0) {
         fprintf(stderr, "xdamage_capture mailbox %s failed: %s\n",
                 mailbox_path, strerror(errno));
+        if (capture_buffer != out)
+            free(capture_buffer);
         free(out);
+        free(last_frame);
         XCloseDisplay(dpy);
         return 1;
     }
@@ -542,8 +600,9 @@ int main(int argc, char **argv)
     xfd = ConnectionNumber(dpy);
     if (debug) {
         fprintf(stderr,
-                "xdamage_capture display=%s size=%ux%u depth=%d bpp=%d shm=%d damage=%d output=%s max_fps=%.1f idle_fps=%.1f masks=%lx/%lx/%lx\n",
-                display_name, width, height, depth, img->bits_per_pixel,
+                "xdamage_capture display=%s input=%ux%u output_size=%ux%u rotation=%s depth=%d bpp=%d shm=%d damage=%d output=%s max_fps=%.1f idle_fps=%.1f masks=%lx/%lx/%lx\n",
+                display_name, width, height, output_width, output_height,
+                frame_rotation_name(rotation), depth, img->bits_per_pixel,
                 use_shm, have_damage, output_rects ? "rects" : "frame",
                 max_fps, idle_fps, img->red_mask, img->green_mask,
                 img->blue_mask);
@@ -584,8 +643,8 @@ int main(int argc, char **argv)
                     merge_rect(&pending, &have_pending, &r);
                 }
                 XDamageSubtract(dpy, damage, None, None);
-            } else if (ev.type == MapNotify || ev.type == UnmapNotify ||
-                    ev.type == ConfigureNotify || ev.type == PropertyNotify) {
+            } else if (!have_damage && (ev.type == MapNotify ||
+                    ev.type == UnmapNotify || ev.type == ConfigureNotify)) {
                 struct rect full = {0, 0, width, height};
 
                 dirty = 1;
@@ -595,7 +654,11 @@ int main(int argc, char **argv)
 
         now = now_sec();
         if (reload_requested || now - last_control_poll >= 0.25) {
-            double new_max_fps = read_fps_file(fps_file, max_fps);
+            double new_max_fps;
+            double new_idle_fps;
+
+            read_fps_file(fps_file, max_fps, idle_fps, &new_max_fps,
+                    &new_idle_fps);
 
             last_control_poll = now;
             reload_requested = 0;
@@ -605,6 +668,13 @@ int main(int argc, char **argv)
                 if (debug)
                     fprintf(stderr, "xdamage_capture max_fps=%.1f (live)\n",
                             max_fps);
+            }
+            if (new_idle_fps != idle_fps) {
+                idle_fps = new_idle_fps;
+                idle_interval = idle_fps > 0.0 ? 1.0 / idle_fps : 0.0;
+                if (debug)
+                    fprintf(stderr, "xdamage_capture idle_fps=%.1f (live)\n",
+                            idle_fps);
             }
         }
 
@@ -622,14 +692,17 @@ int main(int argc, char **argv)
             }
         }
 
-        should_capture = frames == 0 ||
+        /* The initial frame is unconditional; all later work is driven by
+         * real XDamage.  SIGUSR2 is an explicit panel-recovery request, not
+         * a periodic full-frame heartbeat. */
+        should_capture = frames == 0 || force_refresh_requested ||
             (dirty && have_pending && now - last_out >= min_interval) ||
             (idle_interval > 0.0 && now - last_out >= idle_interval);
         if (should_capture) {
             if (output_rects) {
                 struct rect full = {0, 0, width, height};
 
-                if (frames == 0) {
+                if (frames == 0 || force_refresh_requested) {
                     if (capture_rect_packet(dpy, root, &fallback_img, img,
                                 use_shm, out, &rm, &gm, &bm, width, height,
                                 frames + 1, &full) < 0)
@@ -646,17 +719,33 @@ int main(int argc, char **argv)
                     break;
                 }
             } else {
-                if (capture_frame(dpy, root, &fallback_img, img, use_shm, out,
+                int frame_changed;
+
+                if (capture_frame(dpy, root, &fallback_img, img, use_shm,
+                            capture_buffer,
                             &rm, &gm, &bm) < 0)
                     break;
-                if (mailbox)
-                    mailbox_publish(mailbox, frame_bytes, out, frames + 1);
-                else if (fwrite(out, 1, frame_bytes, stdout) != frame_bytes ||
-                        fflush(stdout) != 0)
-                    break;
+                if (rotation != FRAME_ROTATION_NORMAL)
+                    frame_rotate_rgb565be(capture_buffer, width, height, out,
+                            rotation);
+                frame_changed = force_refresh_requested || !have_last_frame ||
+                    memcmp(last_frame, out, frame_bytes) != 0;
+                if (frame_changed) {
+                    if (mailbox)
+                        mailbox_publish(mailbox, frame_bytes, out,
+                                ++published_frames);
+                    else if (fwrite(out, 1, frame_bytes, stdout) != frame_bytes ||
+                            fflush(stdout) != 0)
+                        break;
+                    memcpy(last_frame, out, frame_bytes);
+                    have_last_frame = 1;
+                }
             }
             last_out = now;
             dirty = 0;
+            have_pending = 0;
+            memset(&pending, 0, sizeof(pending));
+            force_refresh_requested = 0;
             frames++;
             continue;
         }
@@ -710,7 +799,10 @@ wait_for_work:
         signal_mailbox = NULL;
         munmap(mailbox, mailbox_size);
     }
+    if (capture_buffer != out)
+        free(capture_buffer);
     free(out);
+    free(last_frame);
     XCloseDisplay(dpy);
     return frames ? 0 : 1;
 }

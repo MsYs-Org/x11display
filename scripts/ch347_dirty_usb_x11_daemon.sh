@@ -21,10 +21,11 @@ APP_NICE="${APP_NICE:-12}"
 MAX_FRAMES="${MAX_FRAMES:-0}"
 DEPTH="${DEPTH:-8}"
 APP="${APP:-glxgears}"
-WM="${WM:-openbox}"
+WM="${WM:-none}"
 DISPLAY_ID="${DISPLAY_ID:-:24}"
 WIDTH="${WIDTH:-320}"
 HEIGHT="${HEIGHT:-480}"
+DISPLAY_ROTATION="${XCAP_ROTATION:-${CH347_DISPLAY_ROTATION:-normal}}"
 PIXFMT="${PIXFMT:-rgb565be}"
 DEBUG="${DEBUG:-0}"
 GATED="${GATED:-0}"
@@ -48,7 +49,12 @@ CH347_GPIO_OVERLAY="${CH347_GPIO_OVERLAY:-0}"
 CH347_GPIO_OVERLAY_MS="${CH347_GPIO_OVERLAY_MS:-200}"
 CH347_RESTART_ON_FAIL="${CH347_RESTART_ON_FAIL:-1}"
 CH347_RESTART_DELAY_SEC="${CH347_RESTART_DELAY_SEC:-2}"
-CH347_RESTART_MAX="${CH347_RESTART_MAX:-3}"
+# A loose USB/serial connection is an output-transport fault, not an X11
+# session fault.  Zero means retry for as long as the existing X session is
+# healthy.  A positive value remains available for bounded bench tests.
+CH347_RESTART_MAX="${CH347_RESTART_MAX:-0}"
+X_SESSION_FATAL_RC="${CH347_X_SESSION_FATAL_RC:-70}"
+X_SESSION_PROBES="${CH347_X_SESSION_PROBES:-3}"
 CH347_TOUCH="${CH347_TOUCH:-0}"
 CH347_TOUCH_USE_IRQ="${CH347_TOUCH_USE_IRQ:-0}"
 CH347_TOUCH_MODE="${CH347_TOUCH_MODE:-touch}"
@@ -82,11 +88,30 @@ CH347_TOUCH_DISABLE_ON_ERRORS="${CH347_TOUCH_DISABLE_ON_ERRORS:-0}"
 if [ -z "${XCAP_IDLE_FPS:-}" ]; then
     XCAP_IDLE_FPS=0
 fi
+case "$DISPLAY_ROTATION:$WIDTH:$HEIGHT" in
+    normal:320:480|portrait:320:480|inverted:320:480|180:320:480|\
+    right:480:320|clockwise:480:320|landscape:480:320|\
+    left:480:320|counter-clockwise:480:320)
+        ;;
+    *)
+        echo "rotation $DISPLAY_ROTATION is incompatible with logical size ${WIDTH}x${HEIGHT}" >&2
+        exit 2
+        ;;
+esac
+if [ "$DISPLAY_ROTATION" != "normal" ] &&
+        [ "$DISPLAY_ROTATION" != "portrait" ] &&
+        [ "$CAPTURE" != "xdamage" ]; then
+    echo "rotated output currently requires CAPTURE=xdamage" >&2
+    exit 2
+fi
 USB_SYS="${CH347_USB_SYS:-/sys/bus/usb/devices/1-1.1}"
 IFACE_ID="${CH347_IFACE_ID:-1-1.1:1.4}"
+CH347_DEVICE_NODE="${CH347_DEVICE_NODE:-/dev/ch34x_pis0}"
 CH347_WAIT_SEC="${CH347_WAIT_SEC:-12}"
 RUN_DIR="${RUN_DIR:-/tmp/ch347_dirty_usb_x11}"
 PID_FILE="$RUN_DIR/pids"
+STACK_OWNER_FILE="${CH347_STACK_OWNER_FILE:-}"
+STACK_OWNER_TOKEN="${CH347_STACK_OWNER_TOKEN:-}"
 CH347_TOUCH_MODE_FILE="${CH347_TOUCH_MODE_FILE:-$RUN_DIR/touch_mode}"
 FRAME_MAILBOX="${CH347_FRAME_MAILBOX:-$RUN_DIR/frame.mailbox}"
 LOG_FILE="$RUN_DIR/live.log"
@@ -101,6 +126,21 @@ APP_PID=""
 GATE_PID=""
 UNBOUND=0
 STOP_REQUESTED=0
+STREAM_CAP_PID=""
+STREAM_SINK_PID=""
+X_SESSION_LOST=0
+
+case "$CH347_RESTART_MAX" in
+    ''|*[!0-9]*) CH347_RESTART_MAX=0 ;;
+esac
+case "$X_SESSION_FATAL_RC" in
+    ''|*[!0-9]*) X_SESSION_FATAL_RC=70 ;;
+esac
+case "$X_SESSION_PROBES" in
+    ''|*[!0-9]*) X_SESSION_PROBES=3 ;;
+esac
+[ "$X_SESSION_FATAL_RC" -ge 1 ] && [ "$X_SESSION_FATAL_RC" -le 255 ] || X_SESSION_FATAL_RC=70
+[ "$X_SESSION_PROBES" -ge 1 ] && [ "$X_SESSION_PROBES" -le 20 ] || X_SESSION_PROBES=3
 
 discover_ch347()
 {
@@ -141,8 +181,8 @@ wait_ch347_bound()
             printf '%s' "$IFACE_ID" > /sys/bus/usb/drivers/ch34x_pis/bind 2>/dev/null || true
         fi
 
-        if [ -d "$USB_SYS" ] && [ -e /dev/ch34x_pis0 ] &&
-                lsusb -t | grep -q 'ch34x_pis, 480M'; then
+        if [ -d "$USB_SYS" ] && [ -e "$CH347_DEVICE_NODE" ] &&
+                lsusb -t | grep 'ch34x_pis, 480M' >/dev/null; then
             return 0
         fi
 
@@ -152,6 +192,47 @@ wait_ch347_bound()
     lsusb -t >&2 || true
     echo "CH347 did not settle as ch34x_pis at 480M within ${CH347_WAIT_SEC}s." >&2
     return 1
+}
+
+owns_stack()
+{
+    # Direct x11display development starts predate provider ownership and
+    # retain their original cleanup behavior. Managed starts always supply
+    # both values and must still own the exact generation token.
+    if [ -z "$STACK_OWNER_FILE" ] || [ -z "$STACK_OWNER_TOKEN" ]; then
+        return 0
+    fi
+    [ -f "$STACK_OWNER_FILE" ] &&
+        [ "$(cat "$STACK_OWNER_FILE" 2>/dev/null || true)" = "$STACK_OWNER_TOKEN" ]
+}
+
+refresh_pid_file()
+{
+    local pid
+    local tmp="$PID_FILE.$$.tmp"
+
+    # A superseded daemon must never replace the new generation's registry.
+    owns_stack || return 0
+    {
+        printf '%s\n' "$$"
+        for pid in "$XVFB_PID" "$WM_PID" "$APP_PID" "$GATE_PID" \
+                "$STREAM_CAP_PID" "$STREAM_SINK_PID"; do
+            [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+        done
+    } > "$tmp"
+    mv -f "$tmp" "$PID_FILE"
+}
+
+stop_stream()
+{
+    set +e
+    [ -n "$STREAM_SINK_PID" ] && kill "$STREAM_SINK_PID" 2>/dev/null || true
+    [ -n "$STREAM_CAP_PID" ] && kill "$STREAM_CAP_PID" 2>/dev/null || true
+    [ -n "$STREAM_SINK_PID" ] && wait "$STREAM_SINK_PID" 2>/dev/null || true
+    [ -n "$STREAM_CAP_PID" ] && wait "$STREAM_CAP_PID" 2>/dev/null || true
+    STREAM_SINK_PID=""
+    STREAM_CAP_PID=""
+    refresh_pid_file
 }
 
 stop_x_stack()
@@ -171,15 +252,23 @@ stop_x_stack()
 cleanup()
 {
     set +e
-    stop_x_stack
-
-    if [ "$UNBOUND" = "1" ] &&
-            [ -d /sys/bus/usb/drivers/ch34x_pis ] &&
-            [ ! -e "/sys/bus/usb/drivers/ch34x_pis/$IFACE_ID" ]; then
-        printf '%s' "$IFACE_ID" > /sys/bus/usb/drivers/ch34x_pis/bind 2>/dev/null || true
+    if [ "${CLEANED:-0}" = "1" ]; then
+        return
     fi
+    CLEANED=1
+    stop_stream
 
-    rm -f "$PID_FILE"
+    if owns_stack; then
+        stop_x_stack
+        if [ "$UNBOUND" = "1" ] &&
+                [ -d /sys/bus/usb/drivers/ch34x_pis ] &&
+                [ ! -e "/sys/bus/usb/drivers/ch34x_pis/$IFACE_ID" ]; then
+            printf '%s' "$IFACE_ID" > /sys/bus/usb/drivers/ch34x_pis/bind 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+    else
+        echo "dirty_usb_x11_cleanup superseded owner; shared state preserved" >>"$LOG_FILE"
+    fi
 }
 
 handle_term()
@@ -191,6 +280,39 @@ handle_term()
 
 trap cleanup EXIT
 trap handle_term INT TERM
+
+x_root_dimensions()
+{
+    # Do not exit awk after the first match. With `set -o pipefail`, an early
+    # reader exit can give xdpyinfo SIGPIPE (141) and make this assignment
+    # terminate the daemon even though Xorg is healthy.
+    DISPLAY="$DISPLAY_ID" xdpyinfo 2>/dev/null |
+        awk '
+            /^[[:space:]]*dimensions:[[:space:]]*[0-9]+x[0-9]+[[:space:]]+pixels/ && dimensions == "" {
+                dimensions = $2
+            }
+            END {
+                if (dimensions != "") {
+                    print dimensions
+                    exit 0
+                }
+                exit 1
+            }
+        '
+}
+
+validate_x_root_dimensions()
+{
+    local dimensions
+    if ! dimensions="$(x_root_dimensions)"; then
+        echo "X root size unavailable expected=${WIDTH}x${HEIGHT}" >>"$LOG_FILE"
+        return 1
+    fi
+    if [ "$dimensions" != "${WIDTH}x${HEIGHT}" ]; then
+        echo "X root size mismatch expected=${WIDTH}x${HEIGHT} actual=$dimensions" >>"$LOG_FILE"
+        return 1
+    fi
+}
 
 start_x_stack()
 {
@@ -209,7 +331,6 @@ start_x_stack()
     fi
 
     XVFB_PID="$!"
-    echo "$XVFB_PID" >> "$PID_FILE"
 
     for _ in $(seq 1 40); do
         if DISPLAY="$DISPLAY_ID" xdpyinfo >/dev/null 2>&1; then
@@ -222,6 +343,14 @@ start_x_stack()
         echo "X server failed to become ready on $DISPLAY_ID" >>"$LOG_FILE"
         return 1
     fi
+
+    if [ "$XSERVER" != "Xvfb" ]; then
+        if ! DISPLAY="$DISPLAY_ID" xrandr --size "${WIDTH}x${HEIGHT}" >>"$LOG_FILE" 2>&1; then
+            echo "Xorg cannot select logical size ${WIDTH}x${HEIGHT}" >>"$LOG_FILE"
+            return 1
+        fi
+    fi
+    validate_x_root_dimensions || return 1
 
     case "$WM" in
         none)
@@ -236,10 +365,6 @@ start_x_stack()
             WM_PID="$!"
             ;;
     esac
-    if [ -n "$WM_PID" ]; then
-        echo "$WM_PID" >> "$PID_FILE"
-    fi
-
     case "$APP" in
         glxgears)
             DISPLAY="$DISPLAY_ID" LIBGL_ALWAYS_SOFTWARE=1 LP_NUM_THREADS=1 GALLIUM_THREAD=0 vblank_mode=0 \
@@ -256,9 +381,6 @@ start_x_stack()
             ;;
     esac
 
-    if [ -n "$APP_PID" ]; then
-        echo "$APP_PID" >> "$PID_FILE"
-    fi
     sleep 2
 
     if [ "$GATED" = "1" ] && [ -n "$APP_PID" ]; then
@@ -281,28 +403,39 @@ start_x_stack()
             done
         ) &
         GATE_PID="$!"
-        echo "$GATE_PID" >> "$PID_FILE"
     fi
+    refresh_pid_file
 }
 
 ensure_x_stack()
 {
-    if [ -n "$XVFB_PID" ] && kill -0 "$XVFB_PID" 2>/dev/null &&
-            DISPLAY="$DISPLAY_ID" xdpyinfo >/dev/null 2>&1; then
-        return 0
-    fi
+    local probe=0
 
-    echo "dirty_usb_x11_restart_x display=$DISPLAY_ID" >>"$LOG_FILE"
-    stop_x_stack
-    start_x_stack
+    # Never silently replace Xorg here.  Replacing it disconnects every X11
+    # client and makes Core mistake a new session for a recovered transport.
+    if [ -z "$XVFB_PID" ] || ! kill -0 "$XVFB_PID" 2>/dev/null; then
+        X_SESSION_LOST=1
+        echo "dirty_usb_x11_x_session_lost display=$DISPLAY_ID reason=server-exited" >>"$LOG_FILE"
+        return "$X_SESSION_FATAL_RC"
+    fi
+    while [ "$probe" -lt "$X_SESSION_PROBES" ]; do
+        if DISPLAY="$DISPLAY_ID" xdpyinfo >/dev/null 2>&1 &&
+                validate_x_root_dimensions; then
+            return 0
+        fi
+        probe=$((probe + 1))
+        [ "$probe" -ge "$X_SESSION_PROBES" ] || sleep 0.1
+    done
+    X_SESSION_LOST=1
+    echo "dirty_usb_x11_x_session_lost display=$DISPLAY_ID reason=probe-failed" >>"$LOG_FILE"
+    return "$X_SESSION_FATAL_RC"
 }
 
+# MSYS_CH347_DAEMON_MAIN
 mkdir -p "$RUN_DIR"
 echo "$$" > "$PID_FILE"
 
-wait_ch347_bound
-
-echo "dirty_usb_x11_start capture=$CAPTURE fps=$FPS xcap_max_fps=$XCAP_MAX_FPS xcap_idle_fps=$XCAP_IDLE_FPS xcap_output=$XCAP_OUTPUT transport=shm-mailbox max_frames=$MAX_FRAMES depth=$DEPTH app=$APP wm=$WM display=$DISPLAY_ID pixfmt=$PIXFMT gated=$GATED render_ms=$RENDER_MS packet_us=$PACKET_US clock=$CH347_CLOCK full_pct=$CH347_FULL_AREA_PCT max_rects=$CH347_MAX_RECTS stale_ms=$CH347_STALE_MS stale_budget=$CH347_STALE_BUDGET hold_cs=$CH347_HOLD_CS latest_only=$CH347_LATEST_ONLY touch=$CH347_TOUCH touch_irq=$CH347_TOUCH_USE_IRQ cursor=$CH347_CURSOR calibrate=$CH347_TOUCH_CALIBRATE gpio_overlay=$CH347_GPIO_OVERLAY gpio_overlay_ms=$CH347_GPIO_OVERLAY_MS urb_timeout_ms=$CH347_URB_TIMEOUT_MS restart_on_fail=$CH347_RESTART_ON_FAIL sink=$CH347_SINK" >>"$LOG_FILE"
+echo "dirty_usb_x11_start capture=$CAPTURE fps=$FPS xcap_max_fps=$XCAP_MAX_FPS xcap_idle_fps=$XCAP_IDLE_FPS xcap_output=$XCAP_OUTPUT rotation=$DISPLAY_ROTATION logical=${WIDTH}x${HEIGHT} transport=shm-mailbox max_frames=$MAX_FRAMES depth=$DEPTH app=$APP wm=$WM display=$DISPLAY_ID pixfmt=$PIXFMT gated=$GATED render_ms=$RENDER_MS packet_us=$PACKET_US clock=$CH347_CLOCK full_pct=$CH347_FULL_AREA_PCT max_rects=$CH347_MAX_RECTS stale_ms=$CH347_STALE_MS stale_budget=$CH347_STALE_BUDGET hold_cs=$CH347_HOLD_CS latest_only=$CH347_LATEST_ONLY touch=$CH347_TOUCH touch_irq=$CH347_TOUCH_USE_IRQ cursor=$CH347_CURSOR calibrate=$CH347_TOUCH_CALIBRATE gpio_overlay=$CH347_GPIO_OVERLAY gpio_overlay_ms=$CH347_GPIO_OVERLAY_MS urb_timeout_ms=$CH347_URB_TIMEOUT_MS restart_on_fail=$CH347_RESTART_ON_FAIL sink=$CH347_SINK" >>"$LOG_FILE"
 start_x_stack
 
 run_stream_once()
@@ -315,8 +448,11 @@ run_stream_once()
     local sink_rc
     local cap_pid
     local sink_pid
+    local finished_pid
+    local first_rc
 
-    ensure_x_stack || return 1
+    X_SESSION_LOST=0
+    ensure_x_stack || return "$?"
     wait_ch347_bound || return 1
     LD_LIBRARY_PATH="$CH347_DIR:${LD_LIBRARY_PATH:-}" \
         "$CH347_ARM" "$CH347_MODE" "$CH347_CLOCK" arm 480 0 raw >>"$LOG_FILE" 2>&1 || return 1
@@ -331,19 +467,20 @@ run_stream_once()
         UNBOUND=1
     fi
 
-    set +e
     case "$CAPTURE" in
         xdamage)
             rm -f "$FRAME_MAILBOX"
             MAX_FRAMES="$MAX_FRAMES" WIDTH="$WIDTH" HEIGHT="$HEIGHT" \
             XCAP_MAX_FPS="$XCAP_MAX_FPS" XCAP_IDLE_FPS="$XCAP_IDLE_FPS" \
             XCAP_DEBUG="$XCAP_DEBUG" XCAP_OUTPUT=frame \
+            XCAP_ROTATION="$DISPLAY_ROTATION" \
             XCAP_FPS_FILE="$XCAP_FPS_FILE" \
             XCAP_MAILBOX="$FRAME_MAILBOX" \
                 nice -n "$XCAP_NICE" \
                 "$XCAP_BIN" "$DISPLAY_ID" "$WIDTH" "$HEIGHT" \
                     "$XCAP_MAX_FPS" "$XCAP_IDLE_FPS" >>"$LOG_FILE" 2>&1 &
             cap_pid="$!"
+            STREAM_CAP_PID="$cap_pid"
 
             CH347_USB_DEV="$usb_dev" CH347_DEBUG="$DEBUG" CH347_PACKET_US="$PACKET_US" \
               CH347_FRAME_MAILBOX="$FRAME_MAILBOX" \
@@ -368,15 +505,33 @@ run_stream_once()
               CH347_TOUCH_Z_MIN="$CH347_TOUCH_Z_MIN" CH347_TOUCH_PRESSURE_MIN="$CH347_TOUCH_PRESSURE_MIN" \
               CH347_TOUCH_Z_STRICT="$CH347_TOUCH_Z_STRICT" CH347_TOUCH_DEBUG="$CH347_TOUCH_DEBUG" \
               CH347_TOUCH_DISABLE_ON_ERRORS="$CH347_TOUCH_DISABLE_ON_ERRORS" DISPLAY_ID="$DISPLAY_ID" \
+              CH347_DISPLAY_ROTATION="$DISPLAY_ROTATION" \
               nice -n "$CH347_SINK_NICE" "$CH347_SINK" "$DEPTH" "$MAX_FRAMES" &
             sink_pid="$!"
-            echo "$cap_pid" >> "$PID_FILE"
-            echo "$sink_pid" >> "$PID_FILE"
-            wait "$sink_pid"
-            sink_rc="$?"
-            kill "$cap_pid" 2>/dev/null || true
-            wait "$cap_pid" 2>/dev/null
-            cap_rc="$?"
+            STREAM_SINK_PID="$sink_pid"
+            refresh_pid_file
+            finished_pid=""
+            wait -n -p finished_pid "$cap_pid" "$sink_pid"
+            first_rc="$?"
+            if [ "$finished_pid" = "$sink_pid" ]; then
+                sink_rc="$first_rc"
+                STREAM_SINK_PID=""
+                kill "$cap_pid" 2>/dev/null || true
+                wait "$cap_pid" 2>/dev/null
+                cap_rc="$?"
+                STREAM_CAP_PID=""
+            else
+                # A dead capture otherwise leaves the sink blocked forever on
+                # a mailbox whose producer is gone. Treat it as a recoverable
+                # stream fault while the same X session is still healthy.
+                cap_rc="$first_rc"
+                STREAM_CAP_PID=""
+                kill "$sink_pid" 2>/dev/null || true
+                wait "$sink_pid" 2>/dev/null || true
+                STREAM_SINK_PID=""
+                if [ "$cap_rc" = "0" ]; then sink_rc=1; else sink_rc="$cap_rc"; fi
+            fi
+            refresh_pid_file
             ffmpeg_rc="$cap_rc"
             ;;
         ffmpeg)
@@ -427,19 +582,16 @@ run_stream_once()
               DISPLAY_ID="$DISPLAY_ID" \
               nice -n "$CH347_SINK_NICE" \
               "$CH347_SINK" "$DEPTH" "$MAX_FRAMES"
+            PIPE_RC=("${PIPESTATUS[@]}")
+            cap_rc="${PIPE_RC[0]}"
+            sink_rc="${PIPE_RC[1]}"
+            ffmpeg_rc="$cap_rc"
             ;;
         *)
             echo "unknown CAPTURE=$CAPTURE" >>"$LOG_FILE"
             false
             ;;
     esac
-    if [ "$CAPTURE" = ffmpeg ]; then
-        PIPE_RC=("${PIPESTATUS[@]}")
-        cap_rc="${PIPE_RC[0]}"
-        sink_rc="${PIPE_RC[1]}"
-        ffmpeg_rc="$cap_rc"
-    fi
-    set -e
     echo "dirty_usb_x11_stream_exit capture=$CAPTURE cap=$cap_rc ffmpeg=$ffmpeg_rc sink=$sink_rc" >>"$LOG_FILE"
 
     if [ -d /sys/bus/usb/drivers/ch34x_pis ] &&
@@ -475,8 +627,21 @@ while :; do
     set -e
 
     if [ "$rc" = "0" ]; then
-        echo "dirty_usb_x11_exit restarts=$RESTARTS status=0" >>"$LOG_FILE"
-        exit 0
+        if [ "$CH347_RESTART_ON_FAIL" = "1" ] && [ "$MAX_FRAMES" = "0" ]; then
+            # The production stream is unbounded. A zero-status sink exit is
+            # therefore not completion (older sinks returned zero after a USB
+            # write failure if at least one frame had already succeeded).
+            echo "dirty_usb_x11_restart rc=0 reason=unexpected-stream-exit count=$RESTARTS" >>"$LOG_FILE"
+            rc=1
+        else
+            echo "dirty_usb_x11_exit restarts=$RESTARTS status=0" >>"$LOG_FILE"
+            exit 0
+        fi
+    fi
+
+    if [ "$X_SESSION_LOST" = "1" ] && [ "$rc" = "$X_SESSION_FATAL_RC" ]; then
+        echo "dirty_usb_x11_exit restarts=$RESTARTS status=x-session-lost rc=$rc" >>"$LOG_FILE"
+        exit "$rc"
     fi
 
     echo "dirty_usb_x11_restart rc=$rc count=$RESTARTS" >>"$LOG_FILE"
@@ -491,7 +656,8 @@ while :; do
         exit "$rc"
     fi
 
-    if [ "$RESTARTS" -ge "$CH347_RESTART_MAX" ]; then
+    if [ "$CH347_RESTART_MAX" -gt 0 ] &&
+            [ "$RESTARTS" -ge "$CH347_RESTART_MAX" ]; then
         echo "dirty_usb_x11_exit restarts=$RESTARTS status=max_restarts" >>"$LOG_FILE"
         exit "$rc"
     fi

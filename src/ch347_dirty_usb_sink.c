@@ -17,6 +17,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "frame_mailbox.h"
+#include "frame_rotation.h"
 
 #define USB_DEV "/dev/bus/usb/001/003"
 #define USB_IFACE 4
@@ -157,6 +158,9 @@ struct touch_state {
     unsigned int release_samples;
     unsigned int release_count;
     int z_strict;
+    enum frame_rotation rotation;
+    unsigned int logical_width;
+    unsigned int logical_height;
     int last_x;
     int last_y;
     int cursor_x;
@@ -417,6 +421,16 @@ static int mailbox_copy_latest(void *mapping, size_t mapping_size,
         return 1;
     }
     return 0;
+}
+
+static int mailbox_copy_next(void *mapping, size_t mapping_size,
+        uint8_t *frame, uint64_t *consumed_seq, unsigned int *captured_frames,
+        unsigned int *dropped_frames, int prefetched_frame)
+{
+    if (prefetched_frame)
+        return 1;
+    return mailbox_copy_latest(mapping, mapping_size, frame, consumed_seq,
+            captured_frames, dropped_frames);
 }
 
 static void *reader_thread(void *arg)
@@ -1262,10 +1276,15 @@ static void x11_touch_close(struct touch_state *ts)
 static void x11_touch_motion(struct touch_state *ts, int x, int y)
 {
     struct x11_touch_api *x11 = &ts->x11;
+    int logical_x;
+    int logical_y;
 
     if (!x11->display)
         return;
-    x11->XTestFakeMotionEvent(x11->display, x11->screen, x, y, 0);
+    frame_rotation_unmap_point(ts->rotation, ts->width, ts->height, x, y,
+            &logical_x, &logical_y);
+    x11->XTestFakeMotionEvent(x11->display, x11->screen, logical_x,
+            logical_y, 0);
     x11->XFlush(x11->display);
 }
 
@@ -1341,21 +1360,32 @@ static void touch_uhid_report(struct touch_state *ts, int x, int y, int down)
     struct uhid_event event;
     uint16_t hx;
     uint16_t hy;
+    int logical_x;
+    int logical_y;
 
     if (ts->uhid.fd < 0)
         return;
+    frame_rotation_unmap_point(ts->rotation, ts->width, ts->height, x, y,
+            &logical_x, &logical_y);
     if (ts->debug)
-        fprintf(stderr, "touch UHID report down=%d xy=%d,%d\n", down, x, y);
+        fprintf(stderr,
+                "touch UHID report down=%d physical=%d,%d logical=%d,%d rotation=%s\n",
+                down, x, y, logical_x, logical_y,
+                frame_rotation_name(ts->rotation));
+    x = logical_x;
+    y = logical_y;
     if (x < 0)
         x = 0;
     if (y < 0)
         y = 0;
-    if ((unsigned int)x >= ts->width)
-        x = (int)ts->width - 1;
-    if ((unsigned int)y >= ts->height)
-        y = (int)ts->height - 1;
-    hx = ts->width > 1 ? (uint16_t)((uint32_t)x * 32767 / (ts->width - 1)) : 0;
-    hy = ts->height > 1 ? (uint16_t)((uint32_t)y * 32767 / (ts->height - 1)) : 0;
+    if ((unsigned int)x >= ts->logical_width)
+        x = (int)ts->logical_width - 1;
+    if ((unsigned int)y >= ts->logical_height)
+        y = (int)ts->logical_height - 1;
+    hx = ts->logical_width > 1 ?
+        (uint16_t)((uint32_t)x * 32767 / (ts->logical_width - 1)) : 0;
+    hy = ts->logical_height > 1 ?
+        (uint16_t)((uint32_t)y * 32767 / (ts->logical_height - 1)) : 0;
 
     memset(&event, 0, sizeof(event));
     event.type = UHID_INPUT2;
@@ -2733,6 +2763,7 @@ int main(int argc, char **argv)
     void *mailbox_mapping = MAP_FAILED;
     size_t mailbox_mapping_size = 0;
     int mailbox_mode = mailbox_path && *mailbox_path;
+    int prefetched_frame = 0;
     int fd;
     int rect_protocol = 0;
     int reader_started = 0;
@@ -2785,6 +2816,11 @@ int main(int argc, char **argv)
     touch.z_min = env_u32("CH347_TOUCH_Z_MIN", 50);
     touch.pressure_min = env_u32("CH347_TOUCH_PRESSURE_MIN", touch.z_min);
     touch.z_strict = env_u32("CH347_TOUCH_Z_STRICT", 1) != 0;
+    if (!frame_rotation_parse(getenv("CH347_DISPLAY_ROTATION"),
+                &touch.rotation)) {
+        fprintf(stderr, "invalid CH347_DISPLAY_ROTATION\n");
+        return 1;
+    }
     touch.touch_clock = env_u32("CH347_TOUCH_CLOCK", 5);
     touch.lcd_clock = env_u32("CH347_CLOCK", 1);
     touch.release_samples = env_u32("CH347_TOUCH_RELEASE_SAMPLES", 3);
@@ -2809,6 +2845,8 @@ int main(int argc, char **argv)
         touch.width = LCD_WIDTH;
     if (touch.height < 2)
         touch.height = LCD_HEIGHT;
+    frame_rotation_output_size(touch.rotation, touch.width, touch.height,
+            &touch.logical_width, &touch.logical_height);
     if (!touch.max_errors)
         touch.max_errors = 1;
     if (!touch.jump_thresh)
@@ -2925,11 +2963,13 @@ int main(int argc, char **argv)
     start = now_sec();
     rate_time = start;
     fprintf(stderr,
-            "dirty_usb_sink depth=%u max_frames=%u tile=%ux%u stale_ms=%u stale_budget=%u max_rects=%u full_pct=%.1f packet_us=%u hold_cs=%d latest_only=%d touch=%d touch_mode=%s touch_irq=%d cursor=%d calibrate=%d gpio_overlay=%d\n",
+            "dirty_usb_sink depth=%u max_frames=%u tile=%ux%u stale_ms=%u stale_budget=%u max_rects=%u full_pct=%.1f packet_us=%u hold_cs=%d latest_only=%d touch=%d touch_mode=%s touch_irq=%d cursor=%d calibrate=%d rotation=%s logical=%ux%u gpio_overlay=%d\n",
             depth, max_frames, TILE_W, TILE_H, stale_ms, stale_budget,
             max_rects, full_area_ratio * 100.0, packet_delay_us, hold_cs,
             latest_only, touch.enabled, touch_mode_name(touch.input_mode),
             touch.use_irq, touch.cursor_enabled, touch.calibrate,
+            frame_rotation_name(touch.rotation), touch.logical_width,
+            touch.logical_height,
             gpio_overlay.enabled);
 
     if (mailbox_mode) {
@@ -2951,6 +2991,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "frame mailbox timed out waiting for first frame\n");
             goto out;
         }
+        /* mailbox_copy_latest() advanced consumed_seq while waiting for the
+         * producer.  Preserve that already-copied frame as pending work so it
+         * follows the normal new-frame path and reaches the panel immediately. */
+        prefetched_frame = 1;
         memset(prev, 0, FRAME_BYTES);
         latest_only = 0;
         goto frame_loop;
@@ -3014,8 +3058,9 @@ frame_loop:
         int gpio_changed = 0;
         int ret;
         if (mailbox_mode) {
-            int got = mailbox_copy_latest(mailbox_mapping, mailbox_mapping_size,
-                    frame, &consumed_seq, &captured_frames, &dropped_frames);
+            int got = mailbox_copy_next(mailbox_mapping, mailbox_mapping_size,
+                    frame, &consumed_seq, &captured_frames, &dropped_frames,
+                    prefetched_frame);
             {
                 struct frame_mailbox_header *header = mailbox_mapping;
                 uint64_t heartbeat = atomic_load_explicit(
@@ -3040,9 +3085,8 @@ frame_loop:
                 fprintf(stderr, "frame mailbox became invalid\n");
                 break;
             }
+            prefetched_frame = 0;
             new_frame = got > 0;
-            if (new_frame)
-                memcpy(base_frame, frame, FRAME_BYTES);
             now = now_sec();
             if (touch.enabled)
                 touch_changed = touch_poll(fd, &touch, now);
@@ -3098,6 +3142,7 @@ frame_loop:
 
             if (reader.eof && reader.seq == consumed_seq) {
                 pthread_mutex_unlock(&reader.lock);
+                exit_status = 0;
                 break;
             }
 
@@ -3141,6 +3186,7 @@ frame_loop:
                     if (repeat_input && input_path &&
                             lseek(input_fd, 0, SEEK_SET) >= 0)
                         continue;
+                    exit_status = 0;
                     break;
                 }
                 if (ret < 0) {
@@ -3152,9 +3198,12 @@ frame_loop:
             captured_frames = frames + 1;
         }
 
-        if (swap16)
+        /* Mailbox cursor-only passes restore the display-order base frame.
+         * Re-swapping it would make the entire panel dirty.  Other inputs
+         * still arrive in capture byte order on every pass. */
+        if (swap16 && (!mailbox_mode || new_frame))
             swap16_frame(frame);
-        if (new_frame && !mailbox_mode)
+        if (new_frame)
             memcpy(base_frame, frame, FRAME_BYTES);
 
         now = now_sec();
@@ -3319,11 +3368,15 @@ frame_loop:
         }
 
         if (touch.cal_done && touch.cal_exit &&
-                now_sec() - touch.cal_done_time > 1.0)
+                now_sec() - touch.cal_done_time > 1.0) {
+            exit_status = 0;
             break;
+        }
 
-        if (max_frames && frames >= max_frames)
+        if (max_frames && frames >= max_frames) {
+            exit_status = 0;
             break;
+        }
     }
 
 out:
@@ -3357,7 +3410,6 @@ out:
                 frames, captured_frames, dropped_frames, now_sec() - start,
                 frames / (now_sec() - start + 0.000001),
                 pixels_sent / (FRAME_PIXELS * (now_sec() - start + 0.000001)));
-        exit_status = frames ? 0 : exit_status;
     }
 
     free(slots);

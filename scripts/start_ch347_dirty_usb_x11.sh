@@ -9,9 +9,29 @@ FPS_FILE="${CH347_FPS_FILE:-$PROJECT_DIR/ch347/fps.env}"
 if [ -f "$FPS_FILE" ]; then
     saved_fps="$(sed -n 's/^FPS=//p' "$FPS_FILE" | tail -1)"
     saved_xcap_fps="$(sed -n 's/^XCAP_MAX_FPS=//p' "$FPS_FILE" | tail -1)"
+    saved_idle_fps="$(sed -n 's/^XCAP_IDLE_FPS=//p' "$FPS_FILE" | tail -1)"
     FPS="${FPS:-${saved_fps:-30}}"
     XCAP_MAX_FPS="${XCAP_MAX_FPS:-${saved_xcap_fps:-$FPS}}"
+    XCAP_IDLE_FPS="${XCAP_IDLE_FPS:-${saved_idle_fps:-0}}"
 fi
+XCAP_IDLE_FPS="${XCAP_IDLE_FPS:-0}"
+DISPLAY_ROTATION="${MSYS_DISPLAY_ROTATION:-${CH347_DISPLAY_ROTATION:-normal}}"
+case "$DISPLAY_ROTATION" in
+    normal|portrait|inverted|180)
+        DEFAULT_WIDTH=320
+        DEFAULT_HEIGHT=480
+        ;;
+    right|clockwise|landscape|left|counter-clockwise)
+        DEFAULT_WIDTH=480
+        DEFAULT_HEIGHT=320
+        ;;
+    *)
+        echo "Unsupported display rotation: $DISPLAY_ROTATION" >&2
+        exit 2
+        ;;
+esac
+WIDTH="${WIDTH:-$DEFAULT_WIDTH}"
+HEIGHT="${HEIGHT:-$DEFAULT_HEIGHT}"
 CAL_FILE_DEFAULT="$PROJECT_DIR/ch347/touch_calibration.env"
 if [ "${CH347_TOUCH:-0}" = "1" ] && [ "${CH347_TOUCH_CALIBRATE:-0}" != "1" ] && [ -f "${CH347_TOUCH_CAL_FILE:-$CAL_FILE_DEFAULT}" ] && [ -z "${CH347_TOUCH_X_MIN+x}" ]; then
     set -a
@@ -44,11 +64,12 @@ nohup env \
     CH347_CLOCK="${CH347_CLOCK:-1}" \
     CAPTURE="${CAPTURE:-xdamage}" \
     XCAP_MAX_FPS="${XCAP_MAX_FPS:-${FPS:-30}}" \
-    XCAP_IDLE_FPS="${XCAP_IDLE_FPS:-}" \
+    XCAP_IDLE_FPS="$XCAP_IDLE_FPS" \
     XSERVER="${XSERVER:-Xorg}" \
     XORG_CONFIG="${XORG_CONFIG:-$PROJECT_DIR/xorg/xorg.conf}" \
     XCAP_DEBUG="${XCAP_DEBUG:-0}" \
     XCAP_OUTPUT="${XCAP_OUTPUT:-frame}" \
+    XCAP_ROTATION="$DISPLAY_ROTATION" \
     XCAP_FPS_FILE="$FPS_FILE" \
     PACKET_US="${PACKET_US:-0}" \
     PIXFMT="${PIXFMT:-rgb565be}" \
@@ -62,10 +83,10 @@ nohup env \
     GATED="${GATED:-0}" \
     RENDER_MS="${RENDER_MS:-30}" \
     APP="${APP:-glxgears}" \
-    WM="${WM:-openbox}" \
+    WM="${WM:-none}" \
     DISPLAY_ID="${DISPLAY_ID:-:24}" \
-    WIDTH="${WIDTH:-320}" \
-    HEIGHT="${HEIGHT:-480}" \
+    WIDTH="$WIDTH" \
+    HEIGHT="$HEIGHT" \
     PROJECT_DIR="$PROJECT_DIR" \
     RUN_DIR="$RUN_DIR" \
     CH347_SINK="${CH347_SINK:-$BIN_DIR/ch347_dirty_usb_sink}" \
@@ -81,7 +102,7 @@ nohup env \
     CH347_GPIO_OVERLAY_MS="${CH347_GPIO_OVERLAY_MS:-200}" \
     CH347_RESTART_ON_FAIL="${CH347_RESTART_ON_FAIL:-1}" \
     CH347_RESTART_DELAY_SEC="${CH347_RESTART_DELAY_SEC:-2}" \
-    CH347_RESTART_MAX="${CH347_RESTART_MAX:-3}" \
+    CH347_RESTART_MAX="${CH347_RESTART_MAX:-0}" \
     CH347_TOUCH="${CH347_TOUCH:-0}" \
     CH347_TOUCH_USE_IRQ="${CH347_TOUCH_USE_IRQ:-0}" \
     CH347_TOUCH_MODE="${CH347_TOUCH_MODE:-touch}" \
@@ -101,6 +122,7 @@ nohup env \
     CH347_TOUCH_Y_MAX="${CH347_TOUCH_Y_MAX:-3900}" \
     CH347_TOUCH_WIDTH="${CH347_TOUCH_WIDTH:-320}" \
     CH347_TOUCH_HEIGHT="${CH347_TOUCH_HEIGHT:-480}" \
+    CH347_DISPLAY_ROTATION="$DISPLAY_ROTATION" \
     CH347_TOUCH_MOVE_THRESH="${CH347_TOUCH_MOVE_THRESH:-2}" \
     CH347_TOUCH_JUMP_THRESH="${CH347_TOUCH_JUMP_THRESH:-160}" \
     CH347_TOUCH_FILTER_WEIGHT="${CH347_TOUCH_FILTER_WEIGHT:-1}" \
@@ -114,7 +136,7 @@ nohup env \
     CH347_TOUCH_DEBUG="${CH347_TOUCH_DEBUG:-0}" \
     CH347_TOUCH_DISABLE_ON_ERRORS="${CH347_TOUCH_DISABLE_ON_ERRORS:-0}" \
     LD_LIBRARY_PATH="$PROJECT_DIR/ch347:${LD_LIBRARY_PATH:-}" \
-    setsid "$DAEMON" >>"$LOG_FILE" 2>&1 &
+    setsid bash "$DAEMON" >>"$LOG_FILE" 2>&1 &
 DAEMON_PID="$!"
 
 sleep 2

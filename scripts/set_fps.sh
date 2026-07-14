@@ -9,16 +9,32 @@ PID_FILE="$RUN_DIR/pids"
 
 usage()
 {
-    echo "usage: $0 FPS [--restart]" >&2
-    echo "example: $0 60 --restart" >&2
+    echo "usage: $0 FPS [--idle FPS] [--restart]" >&2
+    echo "example: $0 60 --idle 0 --restart" >&2
     exit 2
 }
 
-[ $# -ge 1 ] && [ $# -le 2 ] || usage
+[ $# -ge 1 ] || usage
 fps="$1"
+shift
 restart=0
-[ "${2:-}" = "--restart" ] && restart=1
-[ $# -eq 1 ] || [ "$restart" = "1" ] || usage
+idle_fps=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --restart)
+            restart=1
+            shift
+            ;;
+        --idle)
+            [ $# -ge 2 ] || usage
+            idle_fps="$2"
+            shift 2
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
 
 case "$fps" in
     ""|*[!0-9]*) usage ;;
@@ -27,12 +43,24 @@ if [ "$fps" -lt 1 ] || [ "$fps" -gt 240 ]; then
     echo "FPS must be between 1 and 240" >&2
     exit 2
 fi
+if [ -z "$idle_fps" ] && [ -f "$FPS_FILE" ]; then
+    idle_fps="$(sed -n 's/^XCAP_IDLE_FPS=//p' "$FPS_FILE" | tail -1)"
+fi
+idle_fps="${idle_fps:-0}"
+case "$idle_fps" in
+    ""|*[!0-9]*) usage ;;
+esac
+if [ "$idle_fps" -lt 0 ] || [ "$idle_fps" -gt 60 ]; then
+    echo "idle FPS must be between 0 and 60" >&2
+    exit 2
+fi
 
 tmp="$FPS_FILE.tmp.$$"
-printf "FPS=%s\nXCAP_MAX_FPS=%s\n" "$fps" "$fps" > "$tmp"
+printf "FPS=%s\nXCAP_MAX_FPS=%s\nXCAP_IDLE_FPS=%s\n" "$fps" "$fps" "$idle_fps" > "$tmp"
 mv -f "$tmp" "$FPS_FILE"
 
 echo "capture FPS cap set to $fps"
+echo "capture idle FPS set to $idle_fps"
 echo "saved in: $FPS_FILE"
 
 if [ -f "$PID_FILE" ]; then
@@ -61,9 +89,10 @@ if [ "$restart" = "1" ]; then
             debug_enabled="$(tr "\0" "\n" < "/proc/$daemon_pid/environ" | sed -n "s/^DEBUG=//p" | tail -1)"
         fi
     fi
-    "$SCRIPT_DIR/stop_ch347_dirty_usb_x11.sh"
+    bash "$SCRIPT_DIR/stop_ch347_dirty_usb_x11.sh"
     sleep 1
-    CH347_TOUCH="${touch_enabled:-0}" DEBUG="${debug_enabled:-0}" "$SCRIPT_DIR/start_ch347_dirty_usb_x11.sh"
+    CH347_TOUCH="${touch_enabled:-0}" DEBUG="${debug_enabled:-0}" \
+        bash "$SCRIPT_DIR/start_ch347_dirty_usb_x11.sh"
 fi
 
 echo "This is an upper limit; full-screen FPS may remain SPI-bandwidth limited."

@@ -18,8 +18,8 @@
    dirty area is too large.
 8. Video tests showed the full-screen raw link can be faster than dirty X11, but
    RAMWR pointer drift can shift pixels unless RAMWR is reissued regularly.
-9. The X11 path now starts a real window manager by default (`openbox`) so
-   title bars exist on `:24`.
+9. An earlier standalone X11 path started `openbox` for title bars. The MSYS
+   path now defaults to `WM=none`; Openbox is an explicit standalone option.
 10. XPT2046 touch support was added on the shared SPI bus using SCS1 and GPIO3,
     but it is disabled by default until the hardware is connected.
 11. LCD-side cursor overlay and a 5-point calibration mode were added for the

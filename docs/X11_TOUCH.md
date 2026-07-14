@@ -8,6 +8,10 @@ The start script creates an independent virtual X11 display:
 DISPLAY_ID=:24 /root/x11display/scripts/start_ch347_dirty_usb_x11.sh
 ```
 
+The helpers require Bash (`set -euo pipefail` and `PIPESTATUS`). Execute them
+directly through their Bash shebang, or use `bash script.sh`; do not invoke
+them with `sh script.sh`.
+
 Programs that should appear on the LCD must use the same display:
 
 ```bash
@@ -24,16 +28,18 @@ desktop.
 
 Title bars are not drawn by Xvfb. They come from a window manager.
 
-The default is now:
+The MSYS-safe default does not start a second window manager:
 
 ```bash
-WM=openbox
+APP=none WM=none /root/x11display/scripts/start_ch347_dirty_usb_x11.sh
 ```
 
-Disable it for raw full-screen tests:
+`APP=none` is an explicit disable value: the daemon does not start
+`glxgears` or any other demo application. Openbox remains available for a
+standalone desktop smoke test, but must be requested explicitly:
 
 ```bash
-WM=none APP=glxgears /root/x11display/scripts/start_ch347_dirty_usb_x11.sh
+APP=glxgears WM=openbox /root/x11display/scripts/start_ch347_dirty_usb_x11.sh
 ```
 
 Use a different lightweight window manager if installed:
@@ -104,12 +110,17 @@ CH347_CURSOR=0
 ```
 
 The default capture backend is event-driven (`CAPTURE=xdamage`,
-`XCAP_OUTPUT=frame`). With touch disabled, idle capture can drop to zero frames.
-With touch or GPIO overlay enabled, the daemon automatically keeps a low
-`XCAP_IDLE_FPS` tick so the sink continues polling touch even when the X11
-desktop itself is not changing. `XCAP_OUTPUT=rects` exists as an experimental
+`XCAP_OUTPUT=frame`). It always publishes one complete initial frame, even if
+the existing static root window produces no XDamage event. `XCAP_IDLE_FPS=1`
+then provides a bounded 1 FPS refresh heartbeat with or without touch, so a
+static desktop cannot remain blank. Set it to `0` only when deliberately
+disabling idle refresh. `XCAP_OUTPUT=rects` exists as an experimental
 small-change path, but it is slower on glxgears because XDamage reports large
 bounding boxes.
+
+Change both limits live with
+`bash scripts/set_fps.sh 60 --idle 1`; the capture process reloads
+`XCAP_MAX_FPS` and `XCAP_IDLE_FPS` without restarting X11.
 
 ## Calibration
 

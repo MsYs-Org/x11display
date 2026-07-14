@@ -43,7 +43,7 @@
 ```text
 应用程序
   -> Xorg dummy (:24, 320x480)
-  -> openbox
+  -> 默认不启动窗口管理器（WM=none）
   -> XDamage + MIT-SHM 捕获
   -> 共享内存 mailbox 中转最新帧
   -> ch347_dirty_usb_sink 脏区分析
@@ -67,7 +67,8 @@ XPT2046
 - 默认 X server 是 `Xorg`，不是 `Xvfb`
 - 默认捕获方式是 `CAPTURE=xdamage`
 - 默认输出协议是 `XCAP_OUTPUT=frame`
-- 默认窗口管理器是 `openbox`
+- 默认窗口管理器是 `WM=none`；MSYS 自己的窗口策略不会被 Openbox 接管
+- 默认空闲刷新是 `XCAP_IDLE_FPS=1`，静态桌面也会主动输出首帧并维持低频刷新
 - 默认显示分辨率是 `320x480`
 - 默认触摸模式文件会写到 `/tmp/ch347_dirty_usb_x11/touch_mode`
 - 默认触摸是关闭的，需要连线后显式启用
@@ -131,7 +132,6 @@ apt-get update
 apt-get install -y \
   build-essential \
   usbutils \
-  openbox \
   x11-utils \
   xserver-xorg-core \
   xserver-xorg-video-dummy \
@@ -148,6 +148,8 @@ apt-get install -y \
 说明：
 
 - `xserver-xorg-core` 和 `xserver-xorg-video-dummy` 是当前默认路径需要的
+- `openbox` 不是默认依赖；只有显式设置 `WM=openbox` 时才需要
+- `glxgears` 也不是 MSYS 依赖；只有显式设置 `APP=glxgears` 做冒烟测试时才需要
 - `libxtst6` 用于旧的鼠标注入路径
 - 若启用 `touch` 模式下的原生触摸，还依赖系统的 `udev/libinput` 热插拔链路
 
@@ -208,6 +210,10 @@ lsusb -t
 
 ## 快速开始
 
+所有 `scripts/*.sh` 都是 Bash 脚本，并使用 `set -euo pipefail`。请直接执行
+脚本或显式使用 `bash scripts/xxx.sh`，不要用 `sh scripts/xxx.sh`。启动脚本
+也会显式通过 Bash 拉起后台 daemon，确保 `PIPESTATUS` 等 Bash 语义有效。
+
 ### 1. 检查环境
 
 ```bash
@@ -229,9 +235,13 @@ make
 默认会：
 
 - 启动 `:24` 这个 X11 显示
-- 拉起 `openbox`
+- 不拉起第三方窗口管理器（`WM=none`）
 - 默认启动一个 `glxgears` 作为测试应用
 - 开始捕获并把画面推到 LCD
+
+MSYS 启动显示 provider 时使用 `APP=none WM=none`。`APP=none` 是明确的
+禁用值，不会启动 `glxgears`；需要独立冒烟测试时才显式使用
+`APP=glxgears`。
 
 ### 4. 停止
 
@@ -252,13 +262,14 @@ DISPLAY=:24 your-app &
 说明：
 
 - `:24` 是一个独立桌面，不会替换宿主机当前 SSH 或主图形桌面
-- 窗口标题栏来自 `openbox`，不是 X server 自己画的
-- 如果要做纯全屏测试，可以关闭窗口管理器
+- 默认没有 Openbox 标题栏，窗口布局由上层 MSYS 窗口策略负责
+- 如需独立调试传统桌面，可显式启用 Openbox
 
 例如：
 
 ```bash
-WM=none APP=glxgears ./scripts/start_ch347_dirty_usb_x11.sh
+APP=none WM=none ./scripts/start_ch347_dirty_usb_x11.sh
+APP=glxgears WM=openbox ./scripts/start_ch347_dirty_usb_x11.sh
 ```
 
 ## 常用运行参数
@@ -278,7 +289,9 @@ CH347_FULL_AREA_PCT=40
 CH347_HOLD_CS=1
 CH347_LATEST_ONLY=1
 CH347_STALE_MS=0
-WM=openbox
+APP=none
+WM=none
+XCAP_IDLE_FPS=1
 CH347_TOUCH=0
 CH347_TOUCH_CLOCK=5
 ```
@@ -286,12 +299,22 @@ CH347_TOUCH_CLOCK=5
 关键参数含义：
 
 - `CH347_CLOCK=1`：当前更稳定，通常对应 30 MHz
-- `CAPTURE=xdamage`：事件驱动捕获，空闲时不做无意义抓屏
+- `CAPTURE=xdamage`：事件驱动捕获，启动时无条件输出一张完整首帧
+- `XCAP_IDLE_FPS=1`：没有触摸和 XDamage 时仍以 1 FPS 刷新，避免静态桌面不亮
 - `XCAP_MAX_FPS`：捕获上限
 - `FPS`：sink 目标帧率上限
 - `CH347_MAX_RECTS=1`：只发送一个合并脏框
 - `CH347_LATEST_ONLY=1`：只消费最新帧，降低延迟
 - `GATED=0`：默认不再启用 SIGSTOP/SIGCONT 应用门控
+
+运行中可以同时调整活动帧率上限和空闲刷新率，不重启 X11：
+
+```bash
+bash ./scripts/set_fps.sh 60 --idle 1
+```
+
+配置会原子写入 `ch347/fps.env`，并通过 `SIGUSR1` 让捕获进程同时重载
+`XCAP_MAX_FPS` 与 `XCAP_IDLE_FPS`。
 
 ## 触摸支持
 

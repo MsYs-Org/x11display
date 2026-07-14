@@ -6,7 +6,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CAL_FILE="${CH347_TOUCH_CAL_FILE:-$PROJECT_DIR/ch347/touch_calibration.env}"
 CAL_BACKUP="$CAL_FILE.before-filter"
 
-"$SCRIPT_DIR/stop_ch347_dirty_usb_x11.sh" >/dev/null 2>&1 || true
+bash "$SCRIPT_DIR/stop_ch347_dirty_usb_x11.sh" >/dev/null 2>&1 || true
 [ -f "$CAL_FILE" ] && cp -f "$CAL_FILE" "$CAL_BACKUP"
 sleep 1
 
@@ -29,7 +29,7 @@ export FPS="${FPS:-10}"
 export DEBUG="${DEBUG:-0}"
 export CH347_RESTART_ON_FAIL="${CH347_RESTART_ON_FAIL:-0}"
 
-"$SCRIPT_DIR/start_ch347_dirty_usb_x11.sh"
+bash "$SCRIPT_DIR/start_ch347_dirty_usb_x11.sh"
 
 echo "touch calibration started"
 echo "tap and briefly hold the 5 targets on the LCD"
