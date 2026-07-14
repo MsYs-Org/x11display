@@ -2221,6 +2221,27 @@ static size_t rect_pixels(const struct rect *r)
     return (size_t)(r->x1 - r->x0 + 1) * (r->y1 - r->y0 + 1);
 }
 
+static size_t rect_list_pixels(const struct rect *rects, unsigned int count)
+{
+    size_t pixels = 0;
+
+    for (unsigned int i = 0; i < count; i++)
+        pixels += rect_pixels(&rects[i]);
+    return pixels;
+}
+
+static int rect_list_has_full_refresh(const struct rect *rects,
+        unsigned int count)
+{
+    for (unsigned int i = 0; i < count; i++) {
+        if (rects[i].x0 == 0 && rects[i].y0 == 0 &&
+                rects[i].x1 == LCD_WIDTH - 1 &&
+                rects[i].y1 == LCD_HEIGHT - 1)
+            return 1;
+    }
+    return 0;
+}
+
 static int row_diff_bounds(const uint8_t *a, const uint8_t *b,
         unsigned int *x0, unsigned int *x1)
 {
@@ -2758,6 +2779,11 @@ int main(int argc, char **argv)
     double rate_bus_ema = 0.0;
     unsigned int rate_captured_base = 0;
     unsigned int rate_sent_frames = 0;
+    unsigned long long sent_pixels_total = 0;
+    unsigned int sent_frames_total = 0;
+    unsigned int zero_damage_frames = 0;
+    unsigned int full_refreshes = 0;
+    unsigned int large_refreshes = 0;
     int input_fd = -1;
     int mailbox_fd = -1;
     void *mailbox_mapping = MAP_FAILED;
@@ -3052,6 +3078,8 @@ frame_loop:
         unsigned int stale_marked = 0;
         unsigned int rect_count = 0;
         unsigned int send_count = 0;
+        size_t frame_sent_pixels = 0;
+        int frame_full_refresh = 0;
         int poll_wakeup = 0;
         int new_frame = 0;
         int touch_changed = 0;
@@ -3303,6 +3331,13 @@ frame_loop:
             }
         }
 
+        /* Count the actual GRAM payload selected for this pass.  This is
+         * deliberately separate from dirty_area: the latter is a damage
+         * estimate, while merged/overlapping rectangles determine the bytes
+         * physically written to the panel. */
+        frame_sent_pixels = rect_list_pixels(send_list, send_count);
+        frame_full_refresh = rect_list_has_full_refresh(send_list, send_count);
+
         for (unsigned int i = 0; i < send_count; i++) {
             if (send_rect(fd, slots, depth, frame, scratch, &send_list[i],
                         packet_delay_us) < 0) {
@@ -3315,6 +3350,16 @@ frame_loop:
             mark_refreshed(tile_last, &send_list[i], now);
             pixels_sent += rect_pixels(&send_list[i]);
         }
+
+        sent_pixels_total += (unsigned long long)frame_sent_pixels;
+        if (send_count)
+            sent_frames_total++;
+        else
+            zero_damage_frames++;
+        if (frame_full_refresh)
+            full_refreshes++;
+        if (frame_sent_pixels >= (size_t)(FRAME_PIXELS * full_area_ratio))
+            large_refreshes++;
 
         {
             uint8_t *swap = prev;
@@ -3366,6 +3411,13 @@ frame_loop:
                     last_dirty_pct,
                     rate_bus_fps, rate_fps);
         }
+        if (frames == 1 || (frames % 30) == 0) {
+            fprintf(stderr,
+                    "dirty_stats frame=%u sent_frames=%u zero_damage=%u full_refreshes=%u large_refreshes=%u sent_pixels=%llu last_sent_pixels=%zu last_rects=%u\n",
+                    frames, sent_frames_total, zero_damage_frames,
+                    full_refreshes, large_refreshes, sent_pixels_total,
+                    frame_sent_pixels, send_count);
+        }
 
         if (touch.cal_done && touch.cal_exit &&
                 now_sec() - touch.cal_done_time > 1.0) {
@@ -3406,10 +3458,12 @@ out:
         close(input_fd);
 
     if (!rect_protocol) {
-        fprintf(stderr, "dirty_usb_sink frames=%u captured=%u dropped=%u total=%.3fs out_fps=%.2f bus_fps=%.2f\n",
+        fprintf(stderr, "dirty_usb_sink frames=%u captured=%u dropped=%u total=%.3fs out_fps=%.2f bus_fps=%.2f sent_frames=%u zero_damage=%u full_refreshes=%u large_refreshes=%u sent_pixels=%llu\n",
                 frames, captured_frames, dropped_frames, now_sec() - start,
                 frames / (now_sec() - start + 0.000001),
-                pixels_sent / (FRAME_PIXELS * (now_sec() - start + 0.000001)));
+                pixels_sent / (FRAME_PIXELS * (now_sec() - start + 0.000001)),
+                sent_frames_total, zero_damage_frames, full_refreshes,
+                large_refreshes, sent_pixels_total);
     }
 
     free(slots);

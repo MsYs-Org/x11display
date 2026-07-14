@@ -19,6 +19,11 @@ int main(void)
     unsigned int dropped_frames = 0;
     unsigned int slot = 1u % FRAME_MAILBOX_SLOTS;
     int prefetched_frame = 1;
+    struct rect measured[2] = {
+        {0, 0, 9, 9},
+        {20, 30, 24, 33},
+    };
+    struct rect full = {0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1};
 
     assert(mapping != NULL);
     assert(frame != NULL);
@@ -49,6 +54,13 @@ int main(void)
     prefetched_frame = 0;
     assert(mailbox_copy_next(mapping, mapping_size, frame, &consumed_seq,
                 &captured_frames, &dropped_frames, prefetched_frame) == 0);
+
+    /* Refresh accounting reports the physical rectangle payload rather than
+     * the rounded percentage printed by the legacy debug line. */
+    assert(rect_list_pixels(measured, 2) == 120);
+    assert(!rect_list_has_full_refresh(measured, 2));
+    assert(rect_list_pixels(&full, 1) == FRAME_PIXELS);
+    assert(rect_list_has_full_refresh(&full, 1));
 
     free(frame);
     free(mapping);

@@ -103,6 +103,13 @@ CH347_MAX_RECTS=1
 CH347_FULL_AREA_PCT=40
 ```
 
+The sink emits a bounded `dirty_stats` record on the first processed frame and
+every 30 processed frames. It reports exact transmitted pixels, sent versus
+zero-damage passes, and cumulative full/large refresh counts. The counters do
+not change damage selection and remain available when the on-panel debug
+overlay is disabled, so observing refresh behaviour does not itself dirty the
+display.
+
 ## 硬件连接
 
 当前用户态控制路径使用的引脚约定：
