@@ -371,6 +371,31 @@ static int read_full_fd(int fd, uint8_t *buf, size_t len)
     return 1;
 }
 
+static int reset_usb_device(const char *path)
+{
+    int fd;
+    int result;
+
+    if (path == NULL || path[0] != '/') {
+        fprintf(stderr, "usb reset requires an absolute usbfs device path\n");
+        return 64;
+    }
+    fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "usb reset open %s failed: %s\n", path,
+                strerror(errno));
+        return 1;
+    }
+    result = ioctl(fd, USBDEVFS_RESET, 0);
+    if (result < 0)
+        fprintf(stderr, "USBDEVFS_RESET %s failed: %s\n", path,
+                strerror(errno));
+    else
+        fprintf(stderr, "USBDEVFS_RESET %s succeeded\n", path);
+    close(fd);
+    return result < 0 ? 1 : 0;
+}
+
 static uint16_t get_le16(const uint8_t *p)
 {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -2794,6 +2819,9 @@ int main(int argc, char **argv)
     int rect_protocol = 0;
     int reader_started = 0;
     int exit_status = 1;
+
+    if (argc == 3 && strcmp(argv[1], "--usb-reset") == 0)
+        return reset_usb_device(argv[2]);
 
     if (argc > 1)
         depth = (unsigned int)strtoul(argv[1], NULL, 0);

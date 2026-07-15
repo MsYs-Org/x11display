@@ -61,6 +61,8 @@ int main(void)
     assert(!rect_list_has_full_refresh(measured, 2));
     assert(rect_list_pixels(&full, 1) == FRAME_PIXELS);
     assert(rect_list_has_full_refresh(&full, 1));
+    assert(reset_usb_device("relative") == 64);
+    assert(reset_usb_device("/dev/null") == 1);
 
     free(frame);
     free(mapping);
