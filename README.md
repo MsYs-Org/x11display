@@ -68,7 +68,7 @@ XPT2046
 - 默认捕获方式是 `CAPTURE=xdamage`
 - 默认输出协议是 `XCAP_OUTPUT=frame`
 - 默认窗口管理器是 `WM=none`；MSYS 自己的窗口策略不会被 Openbox 接管
-- 默认空闲刷新是 `XCAP_IDLE_FPS=1`，静态桌面也会主动输出首帧并维持低频刷新
+- 默认空闲刷新是 `XCAP_IDLE_FPS=0`，首帧后只响应真实 XDamage 或显式恢复请求
 - 默认显示分辨率是 `320x480`
 - 默认触摸模式文件会写到 `/tmp/ch347_dirty_usb_x11/touch_mode`
 - 默认触摸是关闭的，需要连线后显式启用
@@ -76,8 +76,8 @@ XPT2046
 也就是说，今天这套系统的主路径是：
 
 - `Xorg dummy` 提供一个可热插拔输入设备的 X11 环境
-- `xdamage_shm_capture` 在 SPI 忙时仍持续合并 XDamage 并覆盖 mailbox；
-  sink 每完成一个矩形后只取当时最新的完整帧，不回放拖动中间帧
+- `xdamage_shm_capture` 在 SPI 忙时最多保留一个待发送帧；达到 stablev1
+  的 mailbox 上限后等待 sink 完成当前矩形，不额外覆盖拖动中间态
 - `ch347_dirty_usb_sink` 计算脏区并推送到 LCD
 
 ## 为什么要做“脏区输出”

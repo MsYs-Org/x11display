@@ -600,7 +600,7 @@ int main(int argc, char **argv)
     xfd = ConnectionNumber(dpy);
     if (debug) {
         fprintf(stderr,
-                "xdamage_capture display=%s input=%ux%u output_size=%ux%u rotation=%s depth=%d bpp=%d shm=%d damage=%d output=%s mailbox_policy=latest max_fps=%.1f idle_fps=%.1f masks=%lx/%lx/%lx\n",
+                "xdamage_capture display=%s input=%ux%u output_size=%ux%u rotation=%s depth=%d bpp=%d shm=%d damage=%d output=%s max_fps=%.1f idle_fps=%.1f masks=%lx/%lx/%lx\n",
                 display_name, width, height, output_width, output_height,
                 frame_rotation_name(rotation), depth, img->bits_per_pixel,
                 use_shm, have_damage, output_rects ? "rects" : "frame",
@@ -678,13 +678,19 @@ int main(int argc, char **argv)
             }
         }
 
-        /* Do not pace capture from consumed_seq.  The consumer publishes that
-         * edge only after an entire LCD rectangle has reached the panel.  If
-         * capture stops while one frame is pending, a slow SPI link turns the
-         * mailbox into a one-frame FIFO and visibly replays stale drag
-         * positions.  The three versioned slots are already a latest-frame
-         * mailbox: the producer may keep replacing them while USB is busy,
-         * and the consumer validates slot_seq around its snapshot copy. */
+        if (mailbox) {
+            struct frame_mailbox_header *header = mailbox;
+            uint64_t published = atomic_load_explicit(&header->published_seq,
+                    memory_order_acquire);
+            uint64_t consumed = atomic_load_explicit(&header->consumed_seq,
+                    memory_order_acquire);
+
+            /* Keep one frame ready while USB is busy, but never build a stale queue. */
+            if (published > consumed + 1) {
+                wait_s = 0.002;
+                goto wait_for_work;
+            }
+        }
 
         /* The initial frame is unconditional; all later work is driven by
          * real XDamage.  SIGUSR2 is an explicit panel-recovery request, not
@@ -756,6 +762,9 @@ int main(int argc, char **argv)
             wait_s = 0.0;
         if (fps_file && *fps_file && wait_s > 0.25)
             wait_s = 0.25;
+
+wait_for_work:
+        ;
 
         fd_set fds;
         struct timeval tv;

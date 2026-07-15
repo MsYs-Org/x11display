@@ -47,7 +47,7 @@ test: $(BIN)/test_frame_rotation $(BIN)/test_mailbox_prefetch
 	sh tests/test_stable_dirty_defaults.sh
 
 integration-test: $(BIN)/xdamage_shm_capture
-	sh tests/test_latest_mailbox.sh
+	sh tests/test_mailbox_backpressure.sh
 	sh tests/test_rotation_capture.sh
 	sh tests/test_xorg_modes.sh
 

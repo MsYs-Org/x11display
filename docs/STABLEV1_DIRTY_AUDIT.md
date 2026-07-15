@@ -45,20 +45,14 @@ The archive was not copied wholesale.  The following later behavior remains:
 - ignoring root `PropertyNotify` as pixel damage when XDamage is available;
 - provider ownership, restart, rotation, and process-management changes.
 
-## Slow-link drag follow-up
+## Slow-link capture pacing
 
-The stable archive's single-bbox dirty calculation is still the panel policy,
-but the archive's mailbox producer had a separate latency bug.  Once two
-publications were ahead of the last physically completed panel rectangle it
-stopped capturing.  That preserved one intermediate frame until the slow SPI
-consumer reached it, effectively replaying stale drag positions at bus FPS.
-
-Capture is no longer paced by the panel's `consumed_seq`.  It remains capped by
-`XCAP_MAX_FPS`, continually overwrites the three versioned mailbox slots, and
-the sink copies the newest complete slot only after the preceding `send_rect`
-has reaped all of its URBs.  Slot sequence validation prevents a producer wrap
-from yielding a torn snapshot.  This changes queue/coalescing behavior only;
-the stable one-bbox dirty comparison and rectangle submission are untouched.
+The capture producer again follows the stable archive's mailbox pacing.  Once
+two publications are ahead of the last physically completed panel rectangle,
+it waits for `consumed_seq` instead of continually overwriting the three slots.
+This keeps animation and drag production bounded by the physical SPI consumer
+and avoids introducing a second, latest-frame coalescing policy above the
+stable single-bbox dirty path.
 
 Restoring the old `PropertyNotify` fallback or removing mailbox de-duplication
 would reintroduce unrelated full-screen refreshes, so those capture-side changes
@@ -68,7 +62,9 @@ are not part of the dirty-policy rollback.
 
 `tests/test_stable_dirty_defaults.sh` keeps the configuration file, both launch
 layers, and the sink's built-in fallback aligned with the stable single-bbox
-policy while confirming the stable full-area and stale-refresh defaults.
+policy while confirming the stable full-area, stale-refresh, and mailbox pacing
+defaults. `tests/test_mailbox_backpressure.sh` verifies that an idle consumer
+cannot be overrun by repeated capture requests.
 `tests/test_mailbox_prefetch.c` reproduces the consumed-sequence condition from
 startup and verifies that the prefetched frame still produces one `new_frame`
 edge before an unchanged mailbox becomes idle.
