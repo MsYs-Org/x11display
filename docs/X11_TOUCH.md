@@ -96,17 +96,17 @@ When polling, it periodically deselects LCD CS0, selects touch CS1, slows SPI
 for XPT2046, reads X/Y/Z over SPI, restores the LCD SPI clock and CS0, and
 injects mouse events into the same X11 display through XTest.
 
-It also draws a small LCD-side cursor by default:
-
-```bash
-CH347_CURSOR=1
-```
-
-Disable it if you only want X11's software cursor or want the fewest possible
-dirty pixels:
+The production default does not draw an LCD-side cursor. Touch injection must
+not manufacture framebuffer damage when the application itself is static:
 
 ```bash
 CH347_CURSOR=0
+```
+
+Explicitly enable the cursor only while debugging touch coordinates:
+
+```bash
+CH347_CURSOR=1
 ```
 
 The default capture backend is event-driven (`CAPTURE=xdamage`,

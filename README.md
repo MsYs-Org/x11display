@@ -135,6 +135,11 @@ bounding box. The streaming rect protocol itself remains input-driven: its
 packet-header read is intentionally blocking, so an idle producer's overlay
 snapshot advances on the next rect packet rather than on a separate timer.
 
+LCD-side touch cursor drawing is also opt-in. `CH347_CURSOR=0` is the sink,
+standalone launcher, daemon, and recommended-parameters default, so touch
+movement alone cannot create framebuffer damage. Set `CH347_CURSOR=1` only
+when a visible coordinate marker is useful for touch debugging.
+
 ## 硬件连接
 
 当前用户态控制路径使用的引脚约定：

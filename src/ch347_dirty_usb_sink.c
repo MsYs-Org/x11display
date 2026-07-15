@@ -3228,7 +3228,7 @@ int main(int argc, char **argv)
 
     touch.enabled = env_u32("CH347_TOUCH", 0) != 0;
     touch.use_irq = env_u32("CH347_TOUCH_USE_IRQ", 1) != 0;
-    touch.cursor_enabled = env_u32("CH347_CURSOR", 1) != 0;
+    touch.cursor_enabled = env_u32("CH347_CURSOR", 0) != 0;
     touch.input_mode = touch_mode_parse(getenv("CH347_TOUCH_MODE"),
             TOUCH_MODE_TOUCH);
     touch.calibrate = env_u32("CH347_TOUCH_CALIBRATE", 0) != 0;
