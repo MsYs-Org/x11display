@@ -76,7 +76,8 @@ XPT2046
 也就是说，今天这套系统的主路径是：
 
 - `Xorg dummy` 提供一个可热插拔输入设备的 X11 环境
-- `xdamage_shm_capture` 只保留“最新帧”，避免旧帧积压导致延迟
+- `xdamage_shm_capture` 在 SPI 忙时仍持续合并 XDamage 并覆盖 mailbox；
+  sink 每完成一个矩形后只取当时最新的完整帧，不回放拖动中间帧
 - `ch347_dirty_usb_sink` 计算脏区并推送到 LCD
 
 ## 为什么要做“脏区输出”

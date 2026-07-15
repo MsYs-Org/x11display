@@ -55,6 +55,25 @@ int main(void)
     assert(mailbox_copy_next(mapping, mapping_size, frame, &consumed_seq,
                 &captured_frames, &dropped_frames, prefetched_frame) == 0);
 
+    /* While one SPI rectangle is in flight the producer may wrap all mailbox
+     * slots.  The next consumer pass must jump straight to the newest complete
+     * publication instead of replaying any intermediate position. */
+    for (uint64_t seq = 2; seq <= 7; seq++) {
+        slot = (unsigned int)(seq % FRAME_MAILBOX_SLOTS);
+        memset(frame_mailbox_slot(mapping, FRAME_BYTES, slot), (int)seq,
+                FRAME_BYTES);
+        atomic_store_explicit(&header->slot_seq[slot], seq,
+                memory_order_release);
+        atomic_store_explicit(&header->published_seq, seq,
+                memory_order_release);
+    }
+    assert(mailbox_copy_latest(mapping, mapping_size, frame, &consumed_seq,
+                &captured_frames, &dropped_frames) == 1);
+    assert(consumed_seq == 7);
+    assert(captured_frames == 7);
+    assert(dropped_frames == 5);
+    assert(frame[0] == 7 && frame[FRAME_BYTES - 1] == 7);
+
     /* Refresh accounting reports the physical rectangle payload rather than
      * the rounded percentage printed by the legacy debug line. */
     assert(rect_list_pixels(measured, 2) == 120);

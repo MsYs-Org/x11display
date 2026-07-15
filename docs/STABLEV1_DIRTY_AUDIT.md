@@ -45,6 +45,21 @@ The archive was not copied wholesale.  The following later behavior remains:
 - ignoring root `PropertyNotify` as pixel damage when XDamage is available;
 - provider ownership, restart, rotation, and process-management changes.
 
+## Slow-link drag follow-up
+
+The stable archive's single-bbox dirty calculation is still the panel policy,
+but the archive's mailbox producer had a separate latency bug.  Once two
+publications were ahead of the last physically completed panel rectangle it
+stopped capturing.  That preserved one intermediate frame until the slow SPI
+consumer reached it, effectively replaying stale drag positions at bus FPS.
+
+Capture is no longer paced by the panel's `consumed_seq`.  It remains capped by
+`XCAP_MAX_FPS`, continually overwrites the three versioned mailbox slots, and
+the sink copies the newest complete slot only after the preceding `send_rect`
+has reaped all of its URBs.  Slot sequence validation prevents a producer wrap
+from yielding a torn snapshot.  This changes queue/coalescing behavior only;
+the stable one-bbox dirty comparison and rectangle submission are untouched.
+
 Restoring the old `PropertyNotify` fallback or removing mailbox de-duplication
 would reintroduce unrelated full-screen refreshes, so those capture-side changes
 are not part of the dirty-policy rollback.

@@ -59,4 +59,14 @@ expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
 expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
     'publish_ch347_link_state healthy'
 
+# A slow SPI consumer must not turn the mailbox into a one-frame FIFO.  The
+# producer keeps overwriting versioned slots and the sink snapshots the newest
+# complete slot after each atomic rectangle transfer.
+if grep -F 'published > consumed + 1' \
+        "$ROOT/src/xdamage_shm_capture.c" >/dev/null; then
+    fail "capture still queues one stale intermediate frame behind the SPI sink"
+fi
+expect_fixed_default src/xdamage_shm_capture.c \
+    'Do not pace capture from consumed_seq.'
+
 echo "test_stable_dirty_defaults: ok"
