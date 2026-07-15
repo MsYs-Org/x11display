@@ -65,5 +65,9 @@ expect_fixed_default src/xdamage_shm_capture.c \
     'if (published > consumed + 1) {'
 expect_fixed_default src/xdamage_shm_capture.c \
     'Keep one frame ready while USB is busy, but never build a stale queue.'
+expect_fixed_default src/ch347_dirty_usb_sink.c \
+    'full_pct=inactive(single-bbox)'
+expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
+    'CH347_FULL_AREA_POLICY="inactive-single-bbox"'
 
 echo "test_stable_dirty_defaults: ok"

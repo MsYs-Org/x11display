@@ -3016,15 +3016,25 @@ int main(int argc, char **argv)
 
     start = now_sec();
     rate_time = start;
-    fprintf(stderr,
-            "dirty_usb_sink depth=%u max_frames=%u tile=%ux%u stale_ms=%u stale_budget=%u max_rects=%u full_pct=%.1f packet_us=%u hold_cs=%d latest_only=%d touch=%d touch_mode=%s touch_irq=%d cursor=%d calibrate=%d rotation=%s logical=%ux%u gpio_overlay=%d\n",
-            depth, max_frames, TILE_W, TILE_H, stale_ms, stale_budget,
-            max_rects, full_area_ratio * 100.0, packet_delay_us, hold_cs,
-            latest_only, touch.enabled, touch_mode_name(touch.input_mode),
-            touch.use_irq, touch.cursor_enabled, touch.calibrate,
-            frame_rotation_name(touch.rotation), touch.logical_width,
-            touch.logical_height,
-            gpio_overlay.enabled);
+    if (max_rects == 1 && !stale_ms) {
+        fprintf(stderr,
+                "dirty_usb_sink depth=%u max_frames=%u tile=%ux%u stale_ms=%u stale_budget=%u max_rects=%u full_pct=inactive(single-bbox) packet_us=%u hold_cs=%d latest_only=%d touch=%d touch_mode=%s touch_irq=%d cursor=%d calibrate=%d rotation=%s logical=%ux%u gpio_overlay=%d\n",
+                depth, max_frames, TILE_W, TILE_H, stale_ms, stale_budget,
+                max_rects, packet_delay_us, hold_cs, latest_only, touch.enabled,
+                touch_mode_name(touch.input_mode), touch.use_irq,
+                touch.cursor_enabled, touch.calibrate,
+                frame_rotation_name(touch.rotation), touch.logical_width,
+                touch.logical_height, gpio_overlay.enabled);
+    } else {
+        fprintf(stderr,
+                "dirty_usb_sink depth=%u max_frames=%u tile=%ux%u stale_ms=%u stale_budget=%u max_rects=%u full_pct=%.1f packet_us=%u hold_cs=%d latest_only=%d touch=%d touch_mode=%s touch_irq=%d cursor=%d calibrate=%d rotation=%s logical=%ux%u gpio_overlay=%d\n",
+                depth, max_frames, TILE_W, TILE_H, stale_ms, stale_budget,
+                max_rects, full_area_ratio * 100.0, packet_delay_us, hold_cs,
+                latest_only, touch.enabled, touch_mode_name(touch.input_mode),
+                touch.use_irq, touch.cursor_enabled, touch.calibrate,
+                frame_rotation_name(touch.rotation), touch.logical_width,
+                touch.logical_height, gpio_overlay.enabled);
+    }
 
     if (mailbox_mode) {
         double deadline = now_sec() + 5.0;

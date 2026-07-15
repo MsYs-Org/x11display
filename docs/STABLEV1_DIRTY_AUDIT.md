@@ -27,7 +27,10 @@ looked stalled or uneven on the panel.
 
 The three defaults above are therefore restored to `1`.  Explicit
 `CH347_MAX_RECTS` environment overrides remain supported for experiments.
-`CH347_FULL_AREA_PCT=40` and `CH347_STALE_MS=0` are unchanged.
+`CH347_FULL_AREA_PCT=40` and `CH347_STALE_MS=0` are unchanged. With the
+stable defaults `CH347_MAX_RECTS=1` and `CH347_STALE_MS=0`, the sink takes its
+direct single-bbox path, so the configured 40% fallback is inactive. Runtime
+logs say this explicitly instead of presenting 40% as an effective threshold.
 
 ## Intentionally retained post-stable fixes
 
