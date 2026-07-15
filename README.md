@@ -126,6 +126,15 @@ comma-separated rows with `CH347_DEBUG_OVERLAY_ITEMS`: `fps`, `dirty`,
 `bytes`, `bbox`, and `memory`. `memory` is explicitly the sink process's
 current RSS, not whole-system memory. The default rows are `fps,dirty,bytes`.
 
+When the full-frame mailbox or latest-frame condition-wait path is idle, an
+enabled visible overlay uses its interval as a maximum wake-up delay and sends
+only the overlay bounds. The disabled default adds no timer to the condition
+wait and creates no overlay damage. In the stable `max_rects=1` rect path, an
+overlay update is merged with all damage for that input packet into one
+bounding box. The streaming rect protocol itself remains input-driven: its
+packet-header read is intentionally blocking, so an idle producer's overlay
+snapshot advances on the next rect packet rather than on a separate timer.
+
 ## 硬件连接
 
 当前用户态控制路径使用的引脚约定：

@@ -27,6 +27,9 @@ int main(void)
     struct rect bbox;
     struct debug_overlay_state overlay;
     struct debug_overlay_metrics metrics = {0};
+    struct rect overlay_damage[3];
+    unsigned int overlay_damage_count;
+    size_t overlay_dirty_area;
 
     assert(mapping != NULL);
     assert(frame != NULL);
@@ -96,6 +99,8 @@ int main(void)
     assert(overlay.alpha == 176 && overlay.scale == 1);
     assert(overlay.items == DEBUG_OVERLAY_DEFAULT_ITEMS);
     assert(overlay.interval_ms == 1000);
+    assert(!debug_overlay_due(&overlay, 1.0));
+    assert(idle_wake_interval_ms(0, 0, 0, 0, &overlay, 1.0) == 0);
 
     assert(setenv("CH347_DEBUG_OVERLAY", "1", 1) == 0);
     assert(setenv("CH347_DEBUG_OVERLAY_ALPHA", "128", 1) == 0);
@@ -103,6 +108,9 @@ int main(void)
     assert(setenv("CH347_DEBUG_OVERLAY_ITEMS", "all", 1) == 0);
     assert(setenv("CH347_DEBUG_OVERLAY_INTERVAL_MS", "250", 1) == 0);
     debug_overlay_init(&overlay);
+    assert(debug_overlay_due(&overlay, 1.0));
+    assert(idle_wake_interval_ms(0, 0, 0, 0, &overlay, 1.0) == 1);
+    assert(idle_wake_interval_ms(1, 20, 0, 0, &overlay, 1.0) == 1);
     metrics.capture_fps = 59.5;
     metrics.panel_fps = 8.25;
     metrics.rects = 1;
@@ -122,7 +130,44 @@ int main(void)
     assert(frame[0] != 0xff || frame[1] != 0xff);
     assert(frame[((size_t)LCD_HEIGHT - 1) * STRIDE_BYTES] == 0xff);
     assert(!debug_overlay_sample(&overlay, &metrics, 1.20));
+    assert(!debug_overlay_due(&overlay, 1.20));
+    {
+        unsigned int overlay_wait = idle_wake_interval_ms(0, 0, 0, 0,
+                &overlay, 1.20);
+
+        assert(overlay_wait >= 50 && overlay_wait <= 51);
+    }
+    assert(idle_wake_interval_ms(1, 20, 0, 0, &overlay, 1.20) == 20);
+    assert(debug_overlay_due(&overlay, 1.25));
     assert(debug_overlay_sample(&overlay, &metrics, 1.26));
+
+    overlay_damage[0] = measured[0];
+    overlay_damage[1] = (struct rect){250, 400, 259, 409};
+    overlay_damage[2] = overlay.bounds;
+    overlay_damage_count = 3;
+    assert(collapse_overlay_damage_to_single_bbox(overlay_damage,
+                &overlay_damage_count, 1, 1));
+    assert(overlay_damage_count == 1);
+    assert(overlay_damage[0].x0 == 0 && overlay_damage[0].y0 == 0);
+    assert(overlay_damage[0].x1 == 259 && overlay_damage[0].y1 == 409);
+
+    overlay_damage[0] = measured[0];
+    overlay_damage[1] = measured[1];
+    overlay_damage_count = 2;
+    assert(!collapse_overlay_damage_to_single_bbox(overlay_damage,
+                &overlay_damage_count, 1, 0));
+    assert(overlay_damage_count == 2);
+
+    overlay_damage_count = 0;
+    overlay_dirty_area = 0;
+    assert(select_overlay_idle_damage(overlay_damage, &overlay_damage_count,
+                &overlay_dirty_area, &overlay, 1, 1, 0, 0, 0));
+    assert(overlay_damage_count == 1);
+    assert(memcmp(&overlay_damage[0], &overlay.bounds,
+                sizeof(overlay.bounds)) == 0);
+    assert(overlay_dirty_area == rect_pixels(&overlay.bounds));
+    assert(!select_overlay_idle_damage(overlay_damage, &overlay_damage_count,
+                &overlay_dirty_area, &overlay, 1, 1, 1, 0, 0));
 
     assert(setenv("CH347_DEBUG_OVERLAY_ITEMS", "unknown", 1) == 0);
     debug_overlay_init(&overlay);

@@ -2192,6 +2192,48 @@ static int debug_overlay_sample(struct debug_overlay_state *overlay,
     return 1;
 }
 
+static int debug_overlay_due(const struct debug_overlay_state *overlay,
+        double now)
+{
+    if (!overlay->enabled || !overlay->items || !overlay->alpha)
+        return 0;
+    return overlay->last_sample <= 0.0 ||
+        now - overlay->last_sample >=
+        (double)overlay->interval_ms / 1000.0;
+}
+
+static unsigned int idle_wake_interval_ms(int touch_enabled,
+        unsigned int touch_ms, int gpio_enabled, unsigned int gpio_ms,
+        const struct debug_overlay_state *overlay, double now)
+{
+    unsigned int wake_ms = 0;
+
+    if (touch_enabled)
+        wake_ms = touch_ms ? touch_ms : 1;
+    if (gpio_enabled && (!wake_ms || gpio_ms < wake_ms))
+        wake_ms = gpio_ms ? gpio_ms : 1;
+    if (overlay->enabled && overlay->items && overlay->alpha) {
+        unsigned int overlay_ms = 1;
+
+        if (overlay->last_sample > 0.0) {
+            double elapsed_ms = (now - overlay->last_sample) * 1000.0;
+
+            if (elapsed_ms < (double)overlay->interval_ms) {
+                double remaining_ms = overlay->interval_ms - elapsed_ms;
+
+                overlay_ms = (unsigned int)remaining_ms;
+                if ((double)overlay_ms < remaining_ms)
+                    overlay_ms++;
+                if (!overlay_ms)
+                    overlay_ms = 1;
+            }
+        }
+        if (!wake_ms || overlay_ms < wake_ms)
+            wake_ms = overlay_ms;
+    }
+    return wake_ms;
+}
+
 static void draw_debug_overlay(uint8_t *frame,
         const struct debug_overlay_state *overlay)
 {
@@ -2632,6 +2674,35 @@ static int rect_list_bbox(const struct rect *rects, unsigned int count,
     return 1;
 }
 
+static int collapse_overlay_damage_to_single_bbox(struct rect *rects,
+        unsigned int *count, unsigned int max_rects, int overlay_updated)
+{
+    struct rect bbox;
+
+    if (!overlay_updated || max_rects != 1 || *count <= 1)
+        return 0;
+    if (!rect_list_bbox(rects, *count, &bbox))
+        return 0;
+    rects[0] = bbox;
+    *count = 1;
+    return 1;
+}
+
+static int select_overlay_idle_damage(struct rect *rects,
+        unsigned int *count, size_t *dirty_area,
+        const struct debug_overlay_state *overlay, int overlay_wakeup,
+        int overlay_updated, int new_frame, int touch_changed,
+        int gpio_changed)
+{
+    if (!overlay_wakeup || !overlay_updated || new_frame || touch_changed ||
+            gpio_changed)
+        return 0;
+    *count = 1;
+    rects[0] = overlay->bounds;
+    *dirty_area = rect_pixels(&overlay->bounds);
+    return 1;
+}
+
 static void append_send_rect(struct rect *rects, unsigned int *count,
         const struct rect *r)
 {
@@ -2821,6 +2892,7 @@ static int rect_protocol_loop(int input_fd, int fd, struct slot *slots,
         size_t dirty_area = 0;
         unsigned int dirty_tiles = 0;
         double now;
+        int overlay_updated = 0;
 
         if (memcmp(hdr, RECT_MAGIC, 4)) {
             fprintf(stderr, "rect protocol lost sync\n");
@@ -2939,6 +3011,7 @@ static int rect_protocol_loop(int input_fd, int fd, struct slot *slots,
             metrics.bbox = last_bbox;
             metrics.bbox_valid = last_bbox_valid;
             updated = debug_overlay_sample(debug_overlay, &metrics, now);
+            overlay_updated = updated;
             draw_debug_overlay(frame, debug_overlay);
             if (updated) {
                 append_send_rect(send_list, &send_count,
@@ -3004,6 +3077,10 @@ static int rect_protocol_loop(int input_fd, int fd, struct slot *slots,
             draw_cursor(frame, touch->cursor_x, touch->cursor_y);
             append_send_rect(send_list, &send_count, &overlay_cursor_rect);
         }
+
+        if (collapse_overlay_damage_to_single_bbox(send_list, &send_count,
+                    max_rects, overlay_updated))
+            dirty_area = rect_pixels(&send_list[0]);
 
         for (unsigned int i = 0; i < send_count; i++) {
             if (send_rect(fd, slots, depth, frame, scratch, &send_list[i],
@@ -3434,6 +3511,8 @@ frame_loop:
         int new_frame = 0;
         int touch_changed = 0;
         int gpio_changed = 0;
+        int overlay_wakeup = 0;
+        int overlay_updated = 0;
         int ret;
         if (mailbox_mode) {
             int got = mailbox_copy_next(mailbox_mapping, mailbox_mapping_size,
@@ -3476,7 +3555,9 @@ frame_loop:
                 gpio_overlay.last_poll = now;
                 gpio_changed = 1;
             }
-            if (!new_frame && !touch_changed && !gpio_changed) {
+            overlay_wakeup = debug_overlay_due(&debug_overlay, now);
+            if (!new_frame && !touch_changed && !gpio_changed &&
+                    !overlay_wakeup) {
                 struct timespec pause = {0, 1000000L};
 
                 nanosleep(&pause, NULL);
@@ -3490,15 +3571,13 @@ frame_loop:
 
             pthread_mutex_lock(&reader.lock);
             while (reader.seq == consumed_seq && !reader.eof && !reader.error) {
-                if (touch.enabled || gpio_overlay.enabled) {
-                    struct timespec deadline;
-                    unsigned int wake_ms = touch.enabled ? touch.poll_ms :
-                        gpio_overlay.poll_ms;
+                unsigned int wake_ms = idle_wake_interval_ms(touch.enabled,
+                        touch.poll_ms, gpio_overlay.enabled,
+                        gpio_overlay.poll_ms, &debug_overlay, now_sec());
 
-                    if (gpio_overlay.enabled && gpio_overlay.poll_ms < wake_ms)
-                        wake_ms = gpio_overlay.poll_ms;
-                    if (!wake_ms)
-                        wake_ms = 1;
+                if (wake_ms) {
+                    struct timespec deadline;
+
                     realtime_after_ms(&deadline, wake_ms);
                     ret = pthread_cond_timedwait(&reader.cond, &reader.lock,
                             &deadline);
@@ -3549,7 +3628,10 @@ frame_loop:
                 gpio_changed = 1;
             }
 
-            if (poll_wakeup && !new_frame && !touch_changed && !gpio_changed)
+            overlay_wakeup = debug_overlay_due(&debug_overlay, now);
+
+            if (poll_wakeup && !new_frame && !touch_changed && !gpio_changed &&
+                    !overlay_wakeup)
                 continue;
 
             if (poll_wakeup && !new_frame) {
@@ -3611,7 +3693,8 @@ frame_loop:
             metrics.sent_pixels = sent_pixels_total;
             metrics.bbox = last_bbox;
             metrics.bbox_valid = last_bbox_valid;
-            (void)debug_overlay_sample(&debug_overlay, &metrics, now);
+            overlay_updated = debug_overlay_sample(&debug_overlay, &metrics,
+                    now);
             draw_debug_overlay(frame, &debug_overlay);
         }
 
@@ -3622,7 +3705,11 @@ frame_loop:
         if (gpio_overlay.enabled)
             draw_gpio_overlay(frame, &gpio_overlay);
 
-        if (max_rects == 1 && !stale_ms) {
+        if (select_overlay_idle_damage(send_list, &send_count, &dirty_area,
+                    &debug_overlay, overlay_wakeup, overlay_updated, new_frame,
+                    touch_changed, gpio_changed)) {
+            /* The helper deliberately selects the exact overlay bounds. */
+        } else if (max_rects == 1 && !stale_ms) {
             struct rect bbox;
 
             if (frames == 0) {
