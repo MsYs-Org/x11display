@@ -29,6 +29,18 @@ expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
 expect_fixed_default src/ch347_dirty_usb_sink.c \
     'env_u32("CH347_MAX_RECTS", 1)'
 
+# Debug logging and the optional framebuffer overlay are independent. The
+# production default must never manufacture overlay damage.
+expect_fixed_default src/ch347_dirty_usb_sink.c \
+    'env_u32("CH347_DEBUG", 0)'
+expect_fixed_default src/ch347_dirty_usb_sink.c \
+    'env_u32_range("CH347_DEBUG_OVERLAY", 0, 0, 1)'
+expect_fixed_default ch347/ch347_best_params.env 'CH347_DEBUG_OVERLAY=0'
+expect_fixed_default scripts/start_ch347_dirty_usb_x11.sh \
+    'CH347_DEBUG_OVERLAY="${CH347_DEBUG_OVERLAY:-0}"'
+expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
+    'CH347_DEBUG_OVERLAY="${CH347_DEBUG_OVERLAY:-0}"'
+
 # Keep the two other stable bbox thresholds aligned across configuration and
 # launcher defaults.  Callers may still opt in to experiments through env.
 expect_fixed_default ch347/ch347_best_params.env 'CH347_FULL_AREA_PCT=40'

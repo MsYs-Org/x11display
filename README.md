@@ -111,6 +111,21 @@ not change damage selection and remain available when the on-panel debug
 overlay is disabled, so observing refresh behaviour does not itself dirty the
 display.
 
+Detailed sink logging and the optional framebuffer overlay are separate.
+`CH347_DEBUG=1` enables the low-rate diagnostic log only;
+`CH347_DEBUG_OVERLAY=1` explicitly enables the on-panel overlay, which remains
+off by default. The overlay reads only counters already owned by the sink and
+never polls X11 or another MSYS process. Its text snapshot changes at most once
+per `CH347_DEBUG_OVERLAY_INTERVAL_MS` (default 1000 ms), so it does not
+manufacture per-frame text damage. The stable single-bbox dirty calculation is
+unchanged.
+
+Overlay presentation is bounded by `CH347_DEBUG_OVERLAY_ALPHA=0..255` and
+`CH347_DEBUG_OVERLAY_SCALE=1|2`; the compact 1x font is the default. Select
+comma-separated rows with `CH347_DEBUG_OVERLAY_ITEMS`: `fps`, `dirty`,
+`bytes`, `bbox`, and `memory`. `memory` is explicitly the sink process's
+current RSS, not whole-system memory. The default rows are `fps,dirty,bytes`.
+
 ## 硬件连接
 
 当前用户态控制路径使用的引脚约定：

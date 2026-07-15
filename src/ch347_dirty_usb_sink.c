@@ -86,6 +86,39 @@ struct rect {
     unsigned int y1;
 };
 
+#define DEBUG_OVERLAY_FPS (1u << 0)
+#define DEBUG_OVERLAY_DIRTY (1u << 1)
+#define DEBUG_OVERLAY_BYTES (1u << 2)
+#define DEBUG_OVERLAY_BBOX (1u << 3)
+#define DEBUG_OVERLAY_MEMORY (1u << 4)
+#define DEBUG_OVERLAY_DEFAULT_ITEMS \
+    (DEBUG_OVERLAY_FPS | DEBUG_OVERLAY_DIRTY | DEBUG_OVERLAY_BYTES)
+#define DEBUG_OVERLAY_MAX_LINES 5
+#define DEBUG_OVERLAY_LINE_CAPACITY 48
+
+struct debug_overlay_metrics {
+    double capture_fps;
+    double panel_fps;
+    unsigned int rects;
+    double dirty_pct;
+    size_t last_sent_pixels;
+    unsigned long long sent_pixels;
+    struct rect bbox;
+    int bbox_valid;
+};
+
+struct debug_overlay_state {
+    int enabled;
+    unsigned int alpha;
+    unsigned int scale;
+    unsigned int items;
+    unsigned int interval_ms;
+    double last_sample;
+    unsigned int line_count;
+    char lines[DEBUG_OVERLAY_MAX_LINES][DEBUG_OVERLAY_LINE_CAPACITY];
+    struct rect bounds;
+};
+
 struct reader_state {
     int fd;
     int repeat_input;
@@ -296,6 +329,67 @@ static unsigned int env_u32(const char *name, unsigned int def)
     if (!v || !*v)
         return def;
     return (unsigned int)strtoul(v, NULL, 0);
+}
+
+static unsigned int env_u32_range(const char *name, unsigned int def,
+        unsigned int minimum, unsigned int maximum)
+{
+    const char *value = getenv(name);
+    char *end = NULL;
+    unsigned long parsed;
+
+    if (!value || !*value)
+        return def;
+    errno = 0;
+    parsed = strtoul(value, &end, 10);
+    if (errno || !end || *end || parsed < minimum || parsed > maximum)
+        return def;
+    return (unsigned int)parsed;
+}
+
+static unsigned int debug_overlay_items_parse(const char *value)
+{
+    char copy[128];
+    char *cursor;
+    char *token;
+    unsigned int items = 0;
+
+    if (!value || !*value)
+        return DEBUG_OVERLAY_DEFAULT_ITEMS;
+    if (strlen(value) >= sizeof(copy))
+        return DEBUG_OVERLAY_DEFAULT_ITEMS;
+    memcpy(copy, value, strlen(value) + 1u);
+    cursor = copy;
+    while ((token = strsep(&cursor, ",")) != NULL) {
+        char *end;
+
+        while (*token == ' ' || *token == '\t')
+            token++;
+        end = token + strlen(token);
+        while (end > token && (end[-1] == ' ' || end[-1] == '\t'))
+            *--end = '\0';
+        if (!*token)
+            return DEBUG_OVERLAY_DEFAULT_ITEMS;
+        if (strcmp(token, "all") == 0)
+            items |= DEBUG_OVERLAY_FPS | DEBUG_OVERLAY_DIRTY |
+                DEBUG_OVERLAY_BYTES | DEBUG_OVERLAY_BBOX |
+                DEBUG_OVERLAY_MEMORY;
+        else if (strcmp(token, "none") == 0)
+            items = 0;
+        else if (strcmp(token, "fps") == 0)
+            items |= DEBUG_OVERLAY_FPS;
+        else if (strcmp(token, "dirty") == 0)
+            items |= DEBUG_OVERLAY_DIRTY;
+        else if (strcmp(token, "bytes") == 0)
+            items |= DEBUG_OVERLAY_BYTES;
+        else if (strcmp(token, "bbox") == 0)
+            items |= DEBUG_OVERLAY_BBOX;
+        else if (strcmp(token, "memory") == 0)
+            items |= DEBUG_OVERLAY_MEMORY;
+        else
+            return DEBUG_OVERLAY_DEFAULT_ITEMS;
+    }
+    return items;
 }
 
 static double env_double(const char *name, double def)
@@ -1827,7 +1921,38 @@ static void put_pixel(uint8_t *frame, int x, int y, uint16_t color)
     frame[off + 1] = color & 0xff;
 }
 
-static void draw_glyph(uint8_t *frame, int x, int y, char c, uint16_t color)
+static void put_pixel_alpha(uint8_t *frame, int x, int y, uint16_t color,
+        unsigned int alpha)
+{
+    size_t off;
+    uint16_t old;
+    unsigned int inverse;
+    unsigned int red;
+    unsigned int green;
+    unsigned int blue;
+
+    if (!alpha || x < 0 || y < 0 || x >= LCD_WIDTH || y >= LCD_HEIGHT)
+        return;
+    if (alpha >= 255) {
+        put_pixel(frame, x, y, color);
+        return;
+    }
+    off = ((size_t)y * LCD_WIDTH + x) * 2;
+    old = (uint16_t)((frame[off] << 8) | frame[off + 1]);
+    inverse = 255u - alpha;
+    red = (((old >> 11) & 0x1fu) * inverse +
+            ((color >> 11) & 0x1fu) * alpha + 127u) / 255u;
+    green = (((old >> 5) & 0x3fu) * inverse +
+            ((color >> 5) & 0x3fu) * alpha + 127u) / 255u;
+    blue = ((old & 0x1fu) * inverse + (color & 0x1fu) * alpha + 127u) /
+        255u;
+    old = (uint16_t)((red << 11) | (green << 5) | blue);
+    frame[off] = old >> 8;
+    frame[off + 1] = old & 0xff;
+}
+
+static void draw_glyph_scaled(uint8_t *frame, int x, int y, char c,
+        uint16_t color, unsigned int scale, unsigned int alpha)
 {
     static const uint8_t digits[10][7] = {
         {0x0e,0x11,0x13,0x15,0x19,0x11,0x0e},
@@ -1897,6 +2022,11 @@ static void draw_glyph(uint8_t *frame, int x, int y, char c, uint16_t color)
                 on = yy == 0 || yy == 6 || xx == 2;
             else if (c == 'L')
                 on = xx == 0 || yy == 6;
+            else if (c == 'K')
+                on = xx == 0 || xx == 4 - abs_int(yy - 3);
+            else if (c == 'M')
+                on = xx == 0 || xx == 4 ||
+                    (yy < 3 && (xx == yy + 1 || xx == 3 - yy));
             else if (c == 'N')
                 on = xx == 0 || xx == 4 || xx == yy - 1;
             else if (c == 'O')
@@ -1911,17 +2041,27 @@ static void draw_glyph(uint8_t *frame, int x, int y, char c, uint16_t color)
             else if (c == 'Y')
                 on = (yy < 3 && (xx == yy || xx == 4 - yy)) ||
                     (yy >= 3 && xx == 2);
+            else if (c == ',' || c == '-')
+                on = c == ',' ? (yy >= 5 && (xx == 2 ||
+                            (yy == 6 && xx == 1))) : yy == 3;
             else
                 on = yy == 0 || yy == 6 || xx == 0 || xx == 4;
 
             if (on) {
-                for (int sy = 0; sy < 2; sy++)
-                    for (int sx = 0; sx < 2; sx++)
-                        put_pixel(frame, x + xx * 2 + sx, y + yy * 2 + sy,
-                                color);
+                for (unsigned int sy = 0; sy < scale; sy++)
+                    for (unsigned int sx = 0; sx < scale; sx++)
+                        put_pixel_alpha(frame,
+                                x + xx * (int)scale + (int)sx,
+                                y + yy * (int)scale + (int)sy,
+                                color, alpha);
             }
         }
     }
+}
+
+static void draw_glyph(uint8_t *frame, int x, int y, char c, uint16_t color)
+{
+    draw_glyph_scaled(frame, x, y, c, color, 2, 255);
 }
 
 static void draw_text(uint8_t *frame, int x, int y, const char *s,
@@ -1934,21 +2074,148 @@ static void draw_text(uint8_t *frame, int x, int y, const char *s,
     }
 }
 
-static void draw_debug(uint8_t *frame, double fps, double bus_fps,
-        unsigned int rects, double dirty_pct)
+static unsigned long sink_rss_kib(void)
 {
-    char text[64];
+    FILE *stream;
+    unsigned long total_pages;
+    unsigned long resident_pages;
+    long page_size;
+
+    stream = fopen("/proc/self/statm", "r");
+    if (!stream)
+        return 0;
+    if (fscanf(stream, "%lu %lu", &total_pages, &resident_pages) != 2) {
+        fclose(stream);
+        return 0;
+    }
+    fclose(stream);
+    (void)total_pages;
+    page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0)
+        return 0;
+    return resident_pages * (unsigned long)page_size / 1024u;
+}
+
+static unsigned int debug_overlay_max_chars(unsigned int items)
+{
+    unsigned int width = 0;
+
+    if (items & DEBUG_OVERLAY_FPS)
+        width = 15;
+    if ((items & DEBUG_OVERLAY_DIRTY) && width < 14)
+        width = 14;
+    if ((items & DEBUG_OVERLAY_BYTES) && width < 21)
+        width = 21;
+    if ((items & DEBUG_OVERLAY_BBOX) && width < 19)
+        width = 19;
+    if ((items & DEBUG_OVERLAY_MEMORY) && width < 16)
+        width = 16;
+    return width;
+}
+
+static void debug_overlay_init(struct debug_overlay_state *overlay)
+{
+    unsigned int max_chars;
+    unsigned int lines = 0;
+    unsigned int width;
+    unsigned int height;
+
+    memset(overlay, 0, sizeof(*overlay));
+    overlay->enabled = env_u32_range("CH347_DEBUG_OVERLAY", 0, 0, 1) != 0;
+    overlay->alpha = env_u32_range("CH347_DEBUG_OVERLAY_ALPHA", 176, 0, 255);
+    overlay->scale = env_u32_range("CH347_DEBUG_OVERLAY_SCALE", 1, 1, 2);
+    overlay->interval_ms = env_u32_range(
+            "CH347_DEBUG_OVERLAY_INTERVAL_MS", 1000, 250, 5000);
+    overlay->items = debug_overlay_items_parse(
+            getenv("CH347_DEBUG_OVERLAY_ITEMS"));
+    for (unsigned int bit = 0; bit < DEBUG_OVERLAY_MAX_LINES; bit++)
+        if (overlay->items & (1u << bit))
+            lines++;
+    overlay->line_count = lines;
+    max_chars = debug_overlay_max_chars(overlay->items);
+    width = (max_chars * 6u + 4u) * overlay->scale;
+    height = (lines * 9u + 4u) * overlay->scale;
+    if (!width || !height) {
+        overlay->bounds.x0 = 0;
+        overlay->bounds.y0 = 0;
+        overlay->bounds.x1 = 0;
+        overlay->bounds.y1 = 0;
+        return;
+    }
+    if (width > LCD_WIDTH)
+        width = LCD_WIDTH;
+    if (height > LCD_HEIGHT)
+        height = LCD_HEIGHT;
+    overlay->bounds.x0 = 0;
+    overlay->bounds.y0 = 0;
+    overlay->bounds.x1 = width - 1;
+    overlay->bounds.y1 = height - 1;
+}
+
+static int debug_overlay_sample(struct debug_overlay_state *overlay,
+        const struct debug_overlay_metrics *metrics, double now)
+{
+    unsigned int line = 0;
+
+    if (!overlay->enabled || !overlay->items || !overlay->alpha)
+        return 0;
+    if (overlay->last_sample > 0.0 &&
+            now - overlay->last_sample <
+            (double)overlay->interval_ms / 1000.0)
+        return 0;
+    overlay->last_sample = now;
+    if (overlay->items & DEBUG_OVERLAY_FPS)
+        snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
+                "C:%04.1f P:%04.1f", metrics->capture_fps,
+                metrics->panel_fps);
+    if (overlay->items & DEBUG_OVERLAY_DIRTY)
+        snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
+                "D:%03.0f%% R:%03u", metrics->dirty_pct, metrics->rects);
+    if (overlay->items & DEBUG_OVERLAY_BYTES)
+        snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
+                "B:%zu T:%lluK", metrics->last_sent_pixels * 2u,
+                metrics->sent_pixels * 2u / 1024u);
+    if (overlay->items & DEBUG_OVERLAY_BBOX) {
+        if (metrics->bbox_valid) {
+            snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
+                    "Q:%u,%u-%u,%u", metrics->bbox.x0, metrics->bbox.y0,
+                    metrics->bbox.x1, metrics->bbox.y1);
+        } else {
+            snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
+                    "Q:NONE");
+        }
+    }
+    if (overlay->items & DEBUG_OVERLAY_MEMORY)
+        snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
+                "SINK RSS:%luK", sink_rss_kib());
+    overlay->line_count = line;
+    return 1;
+}
+
+static void draw_debug_overlay(uint8_t *frame,
+        const struct debug_overlay_state *overlay)
+{
     uint16_t bg = rgb565(0, 0, 0);
     uint16_t fg = rgb565(255, 255, 255);
+    unsigned int scale = overlay->scale;
 
-    for (int y = 0; y < 38; y++)
-        for (int x = 0; x < 190; x++)
-            put_pixel(frame, x, y, bg);
+    if (!overlay->enabled || !overlay->line_count || !overlay->alpha)
+        return;
+    for (unsigned int y = overlay->bounds.y0; y <= overlay->bounds.y1; y++)
+        for (unsigned int x = overlay->bounds.x0; x <= overlay->bounds.x1; x++)
+            put_pixel_alpha(frame, (int)x, (int)y, bg, overlay->alpha);
 
-    snprintf(text, sizeof(text), "C:%04.1f P:%04.1f", fps, bus_fps);
-    draw_text(frame, 4, 4, text, fg);
-    snprintf(text, sizeof(text), "R:%03u D:%02.0f%%", rects, dirty_pct);
-    draw_text(frame, 4, 22, text, fg);
+    for (unsigned int line = 0; line < overlay->line_count; line++) {
+        const char *cursor = overlay->lines[line];
+        int x = (int)(2u * scale);
+        int y = (int)((2u + line * 9u) * scale);
+
+        while (*cursor) {
+            draw_glyph_scaled(frame, x, y, *cursor++, fg, scale,
+                    overlay->alpha);
+            x += (int)(6u * scale);
+        }
+    }
 }
 
 static void draw_gpio_overlay(uint8_t *frame, const struct gpio_overlay_state *gs)
@@ -2354,6 +2621,17 @@ static void rect_union_into(struct rect *dst, const struct rect *src)
         dst->y1 = src->y1;
 }
 
+static int rect_list_bbox(const struct rect *rects, unsigned int count,
+        struct rect *bbox)
+{
+    if (!count || !bbox)
+        return 0;
+    *bbox = rects[0];
+    for (unsigned int i = 1; i < count; i++)
+        rect_union_into(bbox, &rects[i]);
+    return 1;
+}
+
 static void append_send_rect(struct rect *rects, unsigned int *count,
         const struct rect *r)
 {
@@ -2502,7 +2780,8 @@ static int rect_protocol_loop(int input_fd, int fd, struct slot *slots,
         unsigned int depth, uint8_t *frame, uint8_t *prev, uint8_t *scratch,
         uint8_t *first_hdr, unsigned int max_frames,
         unsigned int packet_delay_us, int debug, struct touch_state *touch,
-        struct gpio_overlay_state *gpio_overlay, double start,
+        struct gpio_overlay_state *gpio_overlay,
+        struct debug_overlay_state *debug_overlay, double start,
         unsigned int max_rects, double full_area_ratio)
 {
     uint8_t hdr[RECT_HDR_LEN];
@@ -2512,6 +2791,10 @@ static int rect_protocol_loop(int input_fd, int fd, struct slot *slots,
     unsigned int last_rects = 0;
     double last_dirty_pct = 0.0;
     double pixels_sent = 0.0;
+    unsigned long long sent_pixels_total = 0;
+    size_t last_sent_pixels = 0;
+    struct rect last_bbox = {0, 0, 0, 0};
+    int last_bbox_valid = 0;
     uint8_t *base = aligned_alloc(64, FRAME_BYTES);
     int overlay_cursor_visible = 0;
     struct rect overlay_cursor_rect = {0, 0, 0, 0};
@@ -2640,15 +2923,28 @@ static int rect_protocol_loop(int input_fd, int fd, struct slot *slots,
             }
         }
 
-        if (debug) {
+        if (debug_overlay->enabled) {
             double elapsed = now - start + 0.000001;
-            double fps = frames / elapsed;
-            double bus_fps = pixels_sent / (FRAME_PIXELS * elapsed);
-            struct rect dbg = {0, 0, 189, 37};
+            struct debug_overlay_metrics metrics;
+            int updated;
 
-            draw_debug(frame, fps, bus_fps, last_rects, last_dirty_pct);
-            append_send_rect(send_list, &send_count, &dbg);
-            dirty_area += rect_pixels(&dbg);
+            restore_rect_from_base(frame, base, &debug_overlay->bounds);
+            memset(&metrics, 0, sizeof(metrics));
+            metrics.capture_fps = frames / elapsed;
+            metrics.panel_fps = pixels_sent / (FRAME_PIXELS * elapsed);
+            metrics.rects = last_rects;
+            metrics.dirty_pct = last_dirty_pct;
+            metrics.last_sent_pixels = last_sent_pixels;
+            metrics.sent_pixels = sent_pixels_total;
+            metrics.bbox = last_bbox;
+            metrics.bbox_valid = last_bbox_valid;
+            updated = debug_overlay_sample(debug_overlay, &metrics, now);
+            draw_debug_overlay(frame, debug_overlay);
+            if (updated) {
+                append_send_rect(send_list, &send_count,
+                        &debug_overlay->bounds);
+                dirty_area += rect_pixels(&debug_overlay->bounds);
+            }
         }
 
         if (gpio_overlay->enabled &&
@@ -2721,6 +3017,10 @@ static int rect_protocol_loop(int input_fd, int fd, struct slot *slots,
             pixels_sent += rect_pixels(&send_list[i]);
         }
 
+        last_sent_pixels = rect_list_pixels(send_list, send_count);
+        sent_pixels_total += last_sent_pixels;
+        last_bbox_valid = rect_list_bbox(send_list, send_count, &last_bbox);
+
         last_dirty_pct = (double)dirty_area * 100.0 / FRAME_PIXELS;
         last_rects = send_count;
         memcpy(prev, frame, FRAME_BYTES);
@@ -2770,11 +3070,12 @@ int main(int argc, char **argv)
     unsigned int max_rects = env_u32("CH347_MAX_RECTS", 1);
     double full_area_ratio = env_double("CH347_FULL_AREA_PCT", 40.0) / 100.0;
     int swap16 = env_u32("CH347_SWAP16", 0) != 0;
-    int debug = env_u32("CH347_DEBUG", 1) != 0;
+    int debug = env_u32("CH347_DEBUG", 0) != 0;
     int repeat_input = env_u32("CH347_REPEAT_INPUT", 0) != 0;
     int latest_only = env_u32("CH347_LATEST_ONLY", 1) != 0;
     struct touch_state touch;
     struct gpio_overlay_state gpio_overlay;
+    struct debug_overlay_state debug_overlay;
     struct slot *slots;
     struct rect rects[MAX_TILE_RECTS];
     struct rect send_list[MAX_TILE_RECTS];
@@ -2809,6 +3110,9 @@ int main(int argc, char **argv)
     unsigned int zero_damage_frames = 0;
     unsigned int full_refreshes = 0;
     unsigned int large_refreshes = 0;
+    size_t last_sent_pixels = 0;
+    struct rect last_bbox = {0, 0, 0, 0};
+    int last_bbox_valid = 0;
     int input_fd = -1;
     int mailbox_fd = -1;
     void *mailbox_mapping = MAP_FAILED;
@@ -2843,6 +3147,7 @@ int main(int argc, char **argv)
     gpio_overlay.poll_ms = env_u32("CH347_GPIO_OVERLAY_MS", 200);
     if (!gpio_overlay.poll_ms)
         gpio_overlay.poll_ms = 1;
+    debug_overlay_init(&debug_overlay);
 
     touch.enabled = env_u32("CH347_TOUCH", 0) != 0;
     touch.use_irq = env_u32("CH347_TOUCH_USE_IRQ", 1) != 0;
@@ -3018,22 +3323,28 @@ int main(int argc, char **argv)
     rate_time = start;
     if (max_rects == 1 && !stale_ms) {
         fprintf(stderr,
-                "dirty_usb_sink depth=%u max_frames=%u tile=%ux%u stale_ms=%u stale_budget=%u max_rects=%u full_pct=inactive(single-bbox) packet_us=%u hold_cs=%d latest_only=%d touch=%d touch_mode=%s touch_irq=%d cursor=%d calibrate=%d rotation=%s logical=%ux%u gpio_overlay=%d\n",
+                "dirty_usb_sink depth=%u max_frames=%u tile=%ux%u stale_ms=%u stale_budget=%u max_rects=%u full_pct=inactive(single-bbox) packet_us=%u hold_cs=%d latest_only=%d touch=%d touch_mode=%s touch_irq=%d cursor=%d calibrate=%d rotation=%s logical=%ux%u gpio_overlay=%d debug_log=%d debug_overlay=%d overlay_alpha=%u overlay_scale=%u overlay_items=0x%x overlay_ms=%u\n",
                 depth, max_frames, TILE_W, TILE_H, stale_ms, stale_budget,
                 max_rects, packet_delay_us, hold_cs, latest_only, touch.enabled,
                 touch_mode_name(touch.input_mode), touch.use_irq,
                 touch.cursor_enabled, touch.calibrate,
                 frame_rotation_name(touch.rotation), touch.logical_width,
-                touch.logical_height, gpio_overlay.enabled);
+                touch.logical_height, gpio_overlay.enabled, debug,
+                debug_overlay.enabled, debug_overlay.alpha,
+                debug_overlay.scale, debug_overlay.items,
+                debug_overlay.interval_ms);
     } else {
         fprintf(stderr,
-                "dirty_usb_sink depth=%u max_frames=%u tile=%ux%u stale_ms=%u stale_budget=%u max_rects=%u full_pct=%.1f packet_us=%u hold_cs=%d latest_only=%d touch=%d touch_mode=%s touch_irq=%d cursor=%d calibrate=%d rotation=%s logical=%ux%u gpio_overlay=%d\n",
+                "dirty_usb_sink depth=%u max_frames=%u tile=%ux%u stale_ms=%u stale_budget=%u max_rects=%u full_pct=%.1f packet_us=%u hold_cs=%d latest_only=%d touch=%d touch_mode=%s touch_irq=%d cursor=%d calibrate=%d rotation=%s logical=%ux%u gpio_overlay=%d debug_log=%d debug_overlay=%d overlay_alpha=%u overlay_scale=%u overlay_items=0x%x overlay_ms=%u\n",
                 depth, max_frames, TILE_W, TILE_H, stale_ms, stale_budget,
                 max_rects, full_area_ratio * 100.0, packet_delay_us, hold_cs,
                 latest_only, touch.enabled, touch_mode_name(touch.input_mode),
                 touch.use_irq, touch.cursor_enabled, touch.calibrate,
                 frame_rotation_name(touch.rotation), touch.logical_width,
-                touch.logical_height, gpio_overlay.enabled);
+                touch.logical_height, gpio_overlay.enabled, debug,
+                debug_overlay.enabled, debug_overlay.alpha,
+                debug_overlay.scale, debug_overlay.items,
+                debug_overlay.interval_ms);
     }
 
     if (mailbox_mode) {
@@ -3073,7 +3384,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "dirty_usb_sink input=rect-protocol\n");
         exit_status = rect_protocol_loop(input_fd, fd, slots, depth, frame, prev,
                 scratch, first_hdr, max_frames, packet_delay_us, debug, &touch,
-                &gpio_overlay, start, max_rects, full_area_ratio);
+                &gpio_overlay, &debug_overlay, start, max_rects,
+                full_area_ratio);
         goto out;
     }
 
@@ -3287,8 +3599,20 @@ frame_loop:
         bus_fps = rate_bus_fps;
         if (touch.calibrate) {
             draw_calibration(frame, &touch);
-        } else if (debug) {
-            draw_debug(frame, fps, bus_fps, last_rects, last_dirty_pct);
+        } else if (debug_overlay.enabled) {
+            struct debug_overlay_metrics metrics;
+
+            memset(&metrics, 0, sizeof(metrics));
+            metrics.capture_fps = fps;
+            metrics.panel_fps = bus_fps;
+            metrics.rects = last_rects;
+            metrics.dirty_pct = last_dirty_pct;
+            metrics.last_sent_pixels = last_sent_pixels;
+            metrics.sent_pixels = sent_pixels_total;
+            metrics.bbox = last_bbox;
+            metrics.bbox_valid = last_bbox_valid;
+            (void)debug_overlay_sample(&debug_overlay, &metrics, now);
+            draw_debug_overlay(frame, &debug_overlay);
         }
 
         if (touch.enabled && !touch.calibrate && touch.cursor_enabled &&
@@ -3390,6 +3714,8 @@ frame_loop:
         }
 
         sent_pixels_total += (unsigned long long)frame_sent_pixels;
+        last_sent_pixels = frame_sent_pixels;
+        last_bbox_valid = rect_list_bbox(send_list, send_count, &last_bbox);
         if (send_count)
             sent_frames_total++;
         else

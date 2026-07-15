@@ -28,6 +28,11 @@ HEIGHT="${HEIGHT:-480}"
 DISPLAY_ROTATION="${XCAP_ROTATION:-${CH347_DISPLAY_ROTATION:-normal}}"
 PIXFMT="${PIXFMT:-rgb565be}"
 DEBUG="${DEBUG:-0}"
+CH347_DEBUG_OVERLAY="${CH347_DEBUG_OVERLAY:-0}"
+CH347_DEBUG_OVERLAY_ALPHA="${CH347_DEBUG_OVERLAY_ALPHA:-176}"
+CH347_DEBUG_OVERLAY_SCALE="${CH347_DEBUG_OVERLAY_SCALE:-1}"
+CH347_DEBUG_OVERLAY_ITEMS="${CH347_DEBUG_OVERLAY_ITEMS:-fps,dirty,bytes}"
+CH347_DEBUG_OVERLAY_INTERVAL_MS="${CH347_DEBUG_OVERLAY_INTERVAL_MS:-1000}"
 GATED="${GATED:-0}"
 RENDER_MS="${RENDER_MS:-30}"
 GLXGEARS_RENDER_MS="${GLXGEARS_RENDER_MS:-8}"
@@ -525,7 +530,7 @@ mkdir -p "$RUN_DIR"
 echo "$$" > "$PID_FILE"
 publish_ch347_link_state checking
 
-echo "dirty_usb_x11_start capture=$CAPTURE fps=$FPS xcap_max_fps=$XCAP_MAX_FPS xcap_idle_fps=$XCAP_IDLE_FPS xcap_output=$XCAP_OUTPUT rotation=$DISPLAY_ROTATION logical=${WIDTH}x${HEIGHT} transport=shm-mailbox max_frames=$MAX_FRAMES depth=$DEPTH app=$APP wm=$WM display=$DISPLAY_ID pixfmt=$PIXFMT gated=$GATED render_ms=$RENDER_MS packet_us=$PACKET_US clock=$CH347_CLOCK full_pct_config=$CH347_FULL_AREA_PCT full_pct_policy=$CH347_FULL_AREA_POLICY max_rects=$CH347_MAX_RECTS stale_ms=$CH347_STALE_MS stale_budget=$CH347_STALE_BUDGET hold_cs=$CH347_HOLD_CS latest_only=$CH347_LATEST_ONLY touch=$CH347_TOUCH touch_irq=$CH347_TOUCH_USE_IRQ cursor=$CH347_CURSOR calibrate=$CH347_TOUCH_CALIBRATE gpio_overlay=$CH347_GPIO_OVERLAY gpio_overlay_ms=$CH347_GPIO_OVERLAY_MS urb_timeout_ms=$CH347_URB_TIMEOUT_MS restart_on_fail=$CH347_RESTART_ON_FAIL sink=$CH347_SINK" >>"$LOG_FILE"
+echo "dirty_usb_x11_start capture=$CAPTURE fps=$FPS xcap_max_fps=$XCAP_MAX_FPS xcap_idle_fps=$XCAP_IDLE_FPS xcap_output=$XCAP_OUTPUT rotation=$DISPLAY_ROTATION logical=${WIDTH}x${HEIGHT} transport=shm-mailbox max_frames=$MAX_FRAMES depth=$DEPTH app=$APP wm=$WM display=$DISPLAY_ID pixfmt=$PIXFMT gated=$GATED render_ms=$RENDER_MS packet_us=$PACKET_US clock=$CH347_CLOCK full_pct_config=$CH347_FULL_AREA_PCT full_pct_policy=$CH347_FULL_AREA_POLICY max_rects=$CH347_MAX_RECTS stale_ms=$CH347_STALE_MS stale_budget=$CH347_STALE_BUDGET hold_cs=$CH347_HOLD_CS latest_only=$CH347_LATEST_ONLY touch=$CH347_TOUCH touch_irq=$CH347_TOUCH_USE_IRQ cursor=$CH347_CURSOR calibrate=$CH347_TOUCH_CALIBRATE gpio_overlay=$CH347_GPIO_OVERLAY gpio_overlay_ms=$CH347_GPIO_OVERLAY_MS debug_log=$DEBUG debug_overlay=$CH347_DEBUG_OVERLAY overlay_alpha=$CH347_DEBUG_OVERLAY_ALPHA overlay_scale=$CH347_DEBUG_OVERLAY_SCALE overlay_items=$CH347_DEBUG_OVERLAY_ITEMS overlay_ms=$CH347_DEBUG_OVERLAY_INTERVAL_MS urb_timeout_ms=$CH347_URB_TIMEOUT_MS restart_on_fail=$CH347_RESTART_ON_FAIL sink=$CH347_SINK" >>"$LOG_FILE"
 start_x_stack
 
 run_stream_once()
@@ -572,7 +577,13 @@ run_stream_once()
             cap_pid="$!"
             STREAM_CAP_PID="$cap_pid"
 
-            CH347_USB_DEV="$usb_dev" CH347_DEBUG="$DEBUG" CH347_PACKET_US="$PACKET_US" \
+            CH347_USB_DEV="$usb_dev" CH347_DEBUG="$DEBUG" \
+              CH347_DEBUG_OVERLAY="$CH347_DEBUG_OVERLAY" \
+              CH347_DEBUG_OVERLAY_ALPHA="$CH347_DEBUG_OVERLAY_ALPHA" \
+              CH347_DEBUG_OVERLAY_SCALE="$CH347_DEBUG_OVERLAY_SCALE" \
+              CH347_DEBUG_OVERLAY_ITEMS="$CH347_DEBUG_OVERLAY_ITEMS" \
+              CH347_DEBUG_OVERLAY_INTERVAL_MS="$CH347_DEBUG_OVERLAY_INTERVAL_MS" \
+              CH347_PACKET_US="$PACKET_US" \
               CH347_FRAME_MAILBOX="$FRAME_MAILBOX" \
               CH347_FULL_AREA_PCT="$CH347_FULL_AREA_PCT" CH347_MAX_RECTS="$CH347_MAX_RECTS" \
               CH347_STALE_MS="$CH347_STALE_MS" CH347_STALE_BUDGET="$CH347_STALE_BUDGET" \
@@ -629,7 +640,13 @@ run_stream_once()
                 -f x11grab -draw_mouse 0 -video_size "${WIDTH}x${HEIGHT}" -framerate "$FPS" \
                 -i "${DISPLAY_ID}.0+0,0" \
                 -vf "format=${PIXFMT}" -pix_fmt "$PIXFMT" -f rawvideo - \
-            | CH347_USB_DEV="$usb_dev" CH347_DEBUG="$DEBUG" CH347_PACKET_US="$PACKET_US" \
+            | CH347_USB_DEV="$usb_dev" CH347_DEBUG="$DEBUG" \
+              CH347_DEBUG_OVERLAY="$CH347_DEBUG_OVERLAY" \
+              CH347_DEBUG_OVERLAY_ALPHA="$CH347_DEBUG_OVERLAY_ALPHA" \
+              CH347_DEBUG_OVERLAY_SCALE="$CH347_DEBUG_OVERLAY_SCALE" \
+              CH347_DEBUG_OVERLAY_ITEMS="$CH347_DEBUG_OVERLAY_ITEMS" \
+              CH347_DEBUG_OVERLAY_INTERVAL_MS="$CH347_DEBUG_OVERLAY_INTERVAL_MS" \
+              CH347_PACKET_US="$PACKET_US" \
               CH347_FULL_AREA_PCT="$CH347_FULL_AREA_PCT" CH347_MAX_RECTS="$CH347_MAX_RECTS" \
               CH347_STALE_MS="$CH347_STALE_MS" CH347_STALE_BUDGET="$CH347_STALE_BUDGET" \
               CH347_HOLD_CS="$CH347_HOLD_CS" \

@@ -24,6 +24,9 @@ int main(void)
         {20, 30, 24, 33},
     };
     struct rect full = {0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1};
+    struct rect bbox;
+    struct debug_overlay_state overlay;
+    struct debug_overlay_metrics metrics = {0};
 
     assert(mapping != NULL);
     assert(frame != NULL);
@@ -80,6 +83,50 @@ int main(void)
     assert(!rect_list_has_full_refresh(measured, 2));
     assert(rect_list_pixels(&full, 1) == FRAME_PIXELS);
     assert(rect_list_has_full_refresh(&full, 1));
+    assert(rect_list_bbox(measured, 2, &bbox));
+    assert(bbox.x0 == 0 && bbox.y0 == 0 && bbox.x1 == 24 && bbox.y1 == 33);
+
+    unsetenv("CH347_DEBUG_OVERLAY");
+    unsetenv("CH347_DEBUG_OVERLAY_ALPHA");
+    unsetenv("CH347_DEBUG_OVERLAY_SCALE");
+    unsetenv("CH347_DEBUG_OVERLAY_ITEMS");
+    unsetenv("CH347_DEBUG_OVERLAY_INTERVAL_MS");
+    debug_overlay_init(&overlay);
+    assert(!overlay.enabled);
+    assert(overlay.alpha == 176 && overlay.scale == 1);
+    assert(overlay.items == DEBUG_OVERLAY_DEFAULT_ITEMS);
+    assert(overlay.interval_ms == 1000);
+
+    assert(setenv("CH347_DEBUG_OVERLAY", "1", 1) == 0);
+    assert(setenv("CH347_DEBUG_OVERLAY_ALPHA", "128", 1) == 0);
+    assert(setenv("CH347_DEBUG_OVERLAY_SCALE", "1", 1) == 0);
+    assert(setenv("CH347_DEBUG_OVERLAY_ITEMS", "all", 1) == 0);
+    assert(setenv("CH347_DEBUG_OVERLAY_INTERVAL_MS", "250", 1) == 0);
+    debug_overlay_init(&overlay);
+    metrics.capture_fps = 59.5;
+    metrics.panel_fps = 8.25;
+    metrics.rects = 1;
+    metrics.dirty_pct = 12.0;
+    metrics.last_sent_pixels = 2048;
+    metrics.sent_pixels = 4096;
+    metrics.bbox = measured[1];
+    metrics.bbox_valid = 1;
+    assert(debug_overlay_sample(&overlay, &metrics, 1.0));
+    assert(overlay.line_count == 5);
+    assert(strstr(overlay.lines[0], "C:59.5") != NULL);
+    assert(strstr(overlay.lines[2], "B:4096") != NULL);
+    assert(strstr(overlay.lines[3], "Q:20,30-24,33") != NULL);
+    assert(strstr(overlay.lines[4], "SINK RSS:") != NULL);
+    memset(frame, 0xff, FRAME_BYTES);
+    draw_debug_overlay(frame, &overlay);
+    assert(frame[0] != 0xff || frame[1] != 0xff);
+    assert(frame[((size_t)LCD_HEIGHT - 1) * STRIDE_BYTES] == 0xff);
+    assert(!debug_overlay_sample(&overlay, &metrics, 1.20));
+    assert(debug_overlay_sample(&overlay, &metrics, 1.26));
+
+    assert(setenv("CH347_DEBUG_OVERLAY_ITEMS", "unknown", 1) == 0);
+    debug_overlay_init(&overlay);
+    assert(overlay.items == DEBUG_OVERLAY_DEFAULT_ITEMS);
     assert(reset_usb_device("relative") == 64);
     assert(reset_usb_device("/dev/null") == 1);
 
