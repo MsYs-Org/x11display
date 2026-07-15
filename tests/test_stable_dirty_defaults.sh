@@ -50,4 +50,13 @@ expect_fixed_default scripts/start_ch347_dirty_usb_x11.sh \
 expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
     'CH347_RESTART_MAX="${CH347_RESTART_MAX:-0}"'
 
+# A long 480M recovery failure is exported as one state edge for the optional
+# MSYS provider. The standalone tree remains independent from any IPC stack.
+expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
+    'CH347_LINK_STATE_FILE="${CH347_LINK_STATE_FILE:-$RUN_DIR/ch347-link-state.env}"'
+expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
+    'publish_ch347_link_state degraded'
+expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
+    'publish_ch347_link_state healthy'
+
 echo "test_stable_dirty_defaults: ok"
