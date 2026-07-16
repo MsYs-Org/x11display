@@ -1,5 +1,18 @@
 # X11, Window Manager, And Touch
 
+## Normalized affine layer
+
+`CH347_TOUCH_AFFINE_FILE` optionally names the managed affine state. Mapping is
+always raw swap -> min/max normalization -> invert -> normalized affine ->
+physical rotation. `SIGUSR1` reloads the matrix in the existing sink process;
+it releases any active contact and resets only the touch filter. It does not
+restart X11, capture, SPI transport, or applications and does not alter dirty
+frame selection.
+
+When `MSYS_CH347_TOUCH_AFFINE_APPLIED_FILE` is set, the sink atomically writes
+the provider generation, effective revision, and exact matrix after initial
+load and every accepted reload. This is the authoritative readback receipt.
+
 ## X11 Space
 
 The start script creates an independent virtual X11 display:

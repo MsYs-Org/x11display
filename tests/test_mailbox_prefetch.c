@@ -239,7 +239,7 @@ int main(void)
                 runtime_stream) >= 0);
     assert(fclose(runtime_stream) == 0);
     assert(sink_runtime_config_load(&runtime, runtime_path, runtime_path,
-                runtime_path, runtime_path));
+                runtime_path, runtime_path, NULL));
     assert(runtime.debug == 1);
     assert(runtime.cursor_enabled == 1);
     assert(runtime.rotation == FRAME_ROTATION_RIGHT);
@@ -253,7 +253,7 @@ int main(void)
     assert(fputs("DEBUG=invalid\n", runtime_stream) >= 0);
     assert(fclose(runtime_stream) == 0);
     assert(!sink_runtime_config_load(&runtime, runtime_path, runtime_path,
-                runtime_path, runtime_path));
+                runtime_path, runtime_path, NULL));
     assert(runtime.debug == 1 && runtime.rotation == FRAME_ROTATION_RIGHT);
     assert(unlink(runtime_path) == 0);
 
