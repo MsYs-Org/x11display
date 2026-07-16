@@ -398,6 +398,10 @@ static void destroy_capture_image(Display *dpy, XImage *image, int use_shm,
         return;
     if (use_shm) {
         XShmDetach(dpy, shm);
+        /* The server must consume Detach before this client removes its last
+         * local mapping.  This is especially important during live RandR
+         * rotation, where another segment is attached immediately after. */
+        XSync(dpy, False);
         XDestroyImage(image);
         shmdt(shm->shmaddr);
     } else {
@@ -536,7 +540,7 @@ int main(int argc, char **argv)
     int have_damage;
     Damage damage = 0;
     int use_shm;
-    XShmSegmentInfo shm;
+    XShmSegmentInfo *shm;
     XImage *img;
     XImage *fallback_img = NULL;
     uint8_t *out;
@@ -614,11 +618,18 @@ int main(int argc, char **argv)
         XSelectInput(dpy, root, SubstructureNotifyMask | StructureNotifyMask);
     }
 
+    shm = calloc(1, sizeof(*shm));
+    if (!shm) {
+        fprintf(stderr, "xdamage_capture alloc SHM descriptor failed\n");
+        XCloseDisplay(dpy);
+        return 1;
+    }
     use_shm = XShmQueryExtension(dpy);
     img = create_capture_image(dpy, visual, depth, width, height, &use_shm,
-            &shm);
+            shm);
     if (!img) {
         fprintf(stderr, "xdamage_capture cannot create XImage\n");
+        free(shm);
         XCloseDisplay(dpy);
         return 1;
     }
@@ -762,7 +773,7 @@ int main(int argc, char **argv)
                 unsigned int checked_output_height;
                 XWindowAttributes root_attributes;
                 int new_use_shm = XShmQueryExtension(dpy);
-                XShmSegmentInfo new_shm;
+                XShmSegmentInfo *new_shm;
                 XImage *new_image;
                 uint8_t *new_capture_buffer;
 
@@ -791,15 +802,18 @@ int main(int argc, char **argv)
                     fprintf(stderr,
                             "xdamage_capture rotation reload requires frame output\n");
                 } else {
-                    new_image = create_capture_image(dpy, visual, depth,
-                            new_width, new_height, &new_use_shm, &new_shm);
+                    new_shm = calloc(1, sizeof(*new_shm));
+                    new_image = new_shm ? create_capture_image(dpy, visual,
+                            depth, new_width, new_height, &new_use_shm,
+                            new_shm) : NULL;
                     new_capture_buffer =
                         new_rotation == FRAME_ROTATION_NORMAL ? out :
                         malloc(frame_bytes);
                     if (!new_image || !new_capture_buffer) {
                         if (new_image)
                             destroy_capture_image(dpy, new_image, new_use_shm,
-                                    &new_shm);
+                                    new_shm);
+                        free(new_shm);
                         if (new_capture_buffer && new_capture_buffer != out)
                             free(new_capture_buffer);
                         fprintf(stderr,
@@ -809,7 +823,8 @@ int main(int argc, char **argv)
                             XDestroyImage(fallback_img);
                             fallback_img = NULL;
                         }
-                        destroy_capture_image(dpy, img, use_shm, &shm);
+                        destroy_capture_image(dpy, img, use_shm, shm);
+                        free(shm);
                         if (capture_buffer != out)
                             free(capture_buffer);
                         img = new_image;
@@ -944,7 +959,8 @@ wait_for_work:
         XDamageDestroy(dpy, damage);
     if (fallback_img)
         XDestroyImage(fallback_img);
-    destroy_capture_image(dpy, img, use_shm, &shm);
+    destroy_capture_image(dpy, img, use_shm, shm);
+    free(shm);
     if (mailbox) {
         struct frame_mailbox_header *header = mailbox;
 
