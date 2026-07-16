@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define main ch347_dirty_usb_sink_program_main
 #include "../src/ch347_dirty_usb_sink.c"
@@ -30,6 +31,19 @@ int main(void)
     struct rect overlay_damage[3];
     unsigned int overlay_damage_count;
     size_t overlay_dirty_area;
+    char runtime_path[] = "/tmp/msys-sink-runtime-XXXXXX";
+    int runtime_fd;
+    FILE *runtime_stream;
+    struct sink_runtime_config runtime = {
+        .debug = 0,
+        .cursor_enabled = 0,
+        .rotation = FRAME_ROTATION_NORMAL,
+        .overlay_enabled = 0,
+        .overlay_alpha = 176,
+        .overlay_scale = 1,
+        .overlay_items = DEBUG_OVERLAY_DEFAULT_ITEMS,
+        .overlay_interval_ms = 1000,
+    };
 
     assert(mapping != NULL);
     assert(frame != NULL);
@@ -168,6 +182,40 @@ int main(void)
     assert(overlay_dirty_area == rect_pixels(&overlay.bounds));
     assert(!select_overlay_idle_damage(overlay_damage, &overlay_damage_count,
                 &overlay_dirty_area, &overlay, 1, 1, 1, 0, 0));
+
+    runtime_fd = mkstemp(runtime_path);
+    assert(runtime_fd >= 0);
+    runtime_stream = fdopen(runtime_fd, "w");
+    assert(runtime_stream != NULL);
+    assert(fputs(
+                "DEBUG=1\n"
+                "CH347_DEBUG_OVERLAY=1\n"
+                "CH347_DEBUG_OVERLAY_ALPHA=128\n"
+                "CH347_DEBUG_OVERLAY_SCALE=2\n"
+                "CH347_DEBUG_OVERLAY_ITEMS=25\n"
+                "CH347_DEBUG_OVERLAY_INTERVAL_MS=750\n"
+                "CH347_CURSOR=1\n"
+                "CH347_DISPLAY_ROTATION=right\n",
+                runtime_stream) >= 0);
+    assert(fclose(runtime_stream) == 0);
+    assert(sink_runtime_config_load(&runtime, runtime_path, runtime_path,
+                runtime_path, runtime_path));
+    assert(runtime.debug == 1);
+    assert(runtime.cursor_enabled == 1);
+    assert(runtime.rotation == FRAME_ROTATION_RIGHT);
+    assert(runtime.overlay_enabled == 1);
+    assert(runtime.overlay_alpha == 128);
+    assert(runtime.overlay_scale == 2);
+    assert(runtime.overlay_items == 25);
+    assert(runtime.overlay_interval_ms == 750);
+    runtime_stream = fopen(runtime_path, "w");
+    assert(runtime_stream != NULL);
+    assert(fputs("DEBUG=invalid\n", runtime_stream) >= 0);
+    assert(fclose(runtime_stream) == 0);
+    assert(!sink_runtime_config_load(&runtime, runtime_path, runtime_path,
+                runtime_path, runtime_path));
+    assert(runtime.debug == 1 && runtime.rotation == FRAME_ROTATION_RIGHT);
+    assert(unlink(runtime_path) == 0);
 
     assert(setenv("CH347_DEBUG_OVERLAY_ITEMS", "unknown", 1) == 0);
     debug_overlay_init(&overlay);

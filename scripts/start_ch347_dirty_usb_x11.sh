@@ -5,16 +5,64 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN_DIR="$PROJECT_DIR/bin"
 DAEMON="${CH347_DAEMON:-$SCRIPT_DIR/ch347_dirty_usb_x11_daemon.sh}"
+DISPLAY_CONFIG_HELPER="$SCRIPT_DIR/ch347_display_config.sh"
 FPS_FILE="${CH347_FPS_FILE:-$PROJECT_DIR/ch347/fps.env}"
+OVERLAY_FILE="${CH347_DEBUG_OVERLAY_FILE:-$PROJECT_DIR/ch347/debug_overlay.env}"
+CURSOR_FILE="${CH347_CURSOR_FILE:-$PROJECT_DIR/ch347/cursor.env}"
+ROTATION_FILE="${CH347_ROTATION_FILE:-$PROJECT_DIR/ch347/rotation.env}"
+[ -f "$DISPLAY_CONFIG_HELPER" ] || {
+    echo "CH347 display config helper is missing: $DISPLAY_CONFIG_HELPER" >&2
+    exit 2
+}
+# shellcheck disable=SC1090
+. "$DISPLAY_CONFIG_HELPER"
 if [ -f "$FPS_FILE" ]; then
-    saved_fps="$(sed -n 's/^FPS=//p' "$FPS_FILE" | tail -1)"
-    saved_xcap_fps="$(sed -n 's/^XCAP_MAX_FPS=//p' "$FPS_FILE" | tail -1)"
-    saved_idle_fps="$(sed -n 's/^XCAP_IDLE_FPS=//p' "$FPS_FILE" | tail -1)"
-    FPS="${FPS:-${saved_fps:-30}}"
-    XCAP_MAX_FPS="${XCAP_MAX_FPS:-${saved_xcap_fps:-$FPS}}"
-    XCAP_IDLE_FPS="${XCAP_IDLE_FPS:-${saved_idle_fps:-0}}"
+    ch347_read_display_config "$FPS_FILE" || exit 2
+    FPS="${FPS:-$CH347_CONFIG_FPS}"
+    XCAP_MAX_FPS="${XCAP_MAX_FPS:-$CH347_CONFIG_MAX_FPS}"
+    XCAP_IDLE_FPS="${XCAP_IDLE_FPS:-$CH347_CONFIG_IDLE_FPS}"
+    DEBUG="${DEBUG:-$CH347_CONFIG_DEBUG}"
 fi
+if [ -f "$OVERLAY_FILE" ]; then
+    ch347_read_debug_overlay_config "$OVERLAY_FILE" || exit 2
+    CH347_DEBUG_OVERLAY="${CH347_DEBUG_OVERLAY:-$CH347_CONFIG_OVERLAY_ENABLED}"
+    CH347_DEBUG_OVERLAY_ALPHA="${CH347_DEBUG_OVERLAY_ALPHA:-$CH347_CONFIG_OVERLAY_ALPHA}"
+    CH347_DEBUG_OVERLAY_SCALE="${CH347_DEBUG_OVERLAY_SCALE:-$CH347_CONFIG_OVERLAY_SCALE}"
+    CH347_DEBUG_OVERLAY_ITEMS="${CH347_DEBUG_OVERLAY_ITEMS:-$(ch347_debug_overlay_items_text "$CH347_CONFIG_OVERLAY_ITEMS")}"
+    CH347_DEBUG_OVERLAY_INTERVAL_MS="${CH347_DEBUG_OVERLAY_INTERVAL_MS:-$CH347_CONFIG_OVERLAY_INTERVAL_MS}"
+fi
+if [ -f "$CURSOR_FILE" ]; then
+    ch347_read_cursor_config "$CURSOR_FILE" || exit 2
+    CH347_CURSOR="${CH347_CURSOR:-$CH347_CONFIG_CURSOR_ENABLED}"
+fi
+if [ -f "$ROTATION_FILE" ]; then
+    ch347_read_rotation_config "$ROTATION_FILE" || exit 2
+    CH347_DISPLAY_ROTATION="${CH347_DISPLAY_ROTATION:-$CH347_CONFIG_ROTATION}"
+fi
+FPS="${FPS:-30}"
+XCAP_MAX_FPS="${XCAP_MAX_FPS:-$FPS}"
 XCAP_IDLE_FPS="${XCAP_IDLE_FPS:-0}"
+DEBUG="${DEBUG:-0}"
+ch347_config_uint "$FPS" 1 240 || {
+    echo "FPS must be an integer from 1 to 240" >&2
+    exit 2
+}
+ch347_config_uint "$XCAP_MAX_FPS" 1 240 || {
+    echo "XCAP_MAX_FPS must be an integer from 1 to 240" >&2
+    exit 2
+}
+ch347_config_uint "$XCAP_IDLE_FPS" 0 60 || {
+    echo "XCAP_IDLE_FPS must be an integer from 0 to 60" >&2
+    exit 2
+}
+[ "$XCAP_IDLE_FPS" -le "$XCAP_MAX_FPS" ] || {
+    echo "XCAP_IDLE_FPS must not exceed XCAP_MAX_FPS" >&2
+    exit 2
+}
+[ "$DEBUG" = 0 ] || [ "$DEBUG" = 1 ] || {
+    echo "DEBUG must be 0 or 1" >&2
+    exit 2
+}
 DISPLAY_ROTATION="${MSYS_DISPLAY_ROTATION:-${CH347_DISPLAY_ROTATION:-normal}}"
 case "$DISPLAY_ROTATION" in
     normal|portrait|inverted|180)
@@ -71,6 +119,11 @@ nohup env \
     XCAP_OUTPUT="${XCAP_OUTPUT:-frame}" \
     XCAP_ROTATION="$DISPLAY_ROTATION" \
     XCAP_FPS_FILE="$FPS_FILE" \
+    XCAP_ROTATION_FILE="$ROTATION_FILE" \
+    CH347_FPS_FILE="$FPS_FILE" \
+    CH347_DEBUG_OVERLAY_FILE="$OVERLAY_FILE" \
+    CH347_CURSOR_FILE="$CURSOR_FILE" \
+    CH347_ROTATION_FILE="$ROTATION_FILE" \
     PACKET_US="${PACKET_US:-0}" \
     PIXFMT="${PIXFMT:-rgb565be}" \
     FPS="${FPS:-30}" \
@@ -79,7 +132,7 @@ nohup env \
     WINDOW_EACH_FRAME=0 \
     DRAIN_US=0 \
     ACK_READS=0 \
-    DEBUG="${DEBUG:-0}" \
+    DEBUG="$DEBUG" \
     CH347_DEBUG_OVERLAY="${CH347_DEBUG_OVERLAY:-0}" \
     CH347_DEBUG_OVERLAY_ALPHA="${CH347_DEBUG_OVERLAY_ALPHA:-176}" \
     CH347_DEBUG_OVERLAY_SCALE="${CH347_DEBUG_OVERLAY_SCALE:-1}" \

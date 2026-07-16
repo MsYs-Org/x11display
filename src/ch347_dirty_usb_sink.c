@@ -7,6 +7,7 @@
 #include <linux/uhid.h>
 #include <linux/input.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,6 +96,14 @@ struct rect {
     (DEBUG_OVERLAY_FPS | DEBUG_OVERLAY_DIRTY | DEBUG_OVERLAY_BYTES)
 #define DEBUG_OVERLAY_MAX_LINES 5
 #define DEBUG_OVERLAY_LINE_CAPACITY 48
+
+static volatile sig_atomic_t runtime_reload_requested;
+
+static void runtime_reload_signal(int signal_number)
+{
+    if (signal_number == SIGUSR1)
+        runtime_reload_requested = 1;
+}
 
 struct debug_overlay_metrics {
     double capture_fps;
@@ -2113,7 +2122,9 @@ static unsigned int debug_overlay_max_chars(unsigned int items)
     return width;
 }
 
-static void debug_overlay_init(struct debug_overlay_state *overlay)
+static void debug_overlay_configure(struct debug_overlay_state *overlay,
+        int enabled, unsigned int alpha, unsigned int scale,
+        unsigned int items, unsigned int interval_ms)
 {
     unsigned int max_chars;
     unsigned int lines = 0;
@@ -2121,13 +2132,11 @@ static void debug_overlay_init(struct debug_overlay_state *overlay)
     unsigned int height;
 
     memset(overlay, 0, sizeof(*overlay));
-    overlay->enabled = env_u32_range("CH347_DEBUG_OVERLAY", 0, 0, 1) != 0;
-    overlay->alpha = env_u32_range("CH347_DEBUG_OVERLAY_ALPHA", 176, 0, 255);
-    overlay->scale = env_u32_range("CH347_DEBUG_OVERLAY_SCALE", 1, 1, 2);
-    overlay->interval_ms = env_u32_range(
-            "CH347_DEBUG_OVERLAY_INTERVAL_MS", 1000, 250, 5000);
-    overlay->items = debug_overlay_items_parse(
-            getenv("CH347_DEBUG_OVERLAY_ITEMS"));
+    overlay->enabled = enabled != 0;
+    overlay->alpha = alpha;
+    overlay->scale = scale;
+    overlay->interval_ms = interval_ms;
+    overlay->items = items;
     for (unsigned int bit = 0; bit < DEBUG_OVERLAY_MAX_LINES; bit++)
         if (overlay->items & (1u << bit))
             lines++;
@@ -2150,6 +2159,177 @@ static void debug_overlay_init(struct debug_overlay_state *overlay)
     overlay->bounds.y0 = 0;
     overlay->bounds.x1 = width - 1;
     overlay->bounds.y1 = height - 1;
+}
+
+static void debug_overlay_init(struct debug_overlay_state *overlay)
+{
+    debug_overlay_configure(overlay,
+            env_u32_range("CH347_DEBUG_OVERLAY", 0, 0, 1) != 0,
+            env_u32_range("CH347_DEBUG_OVERLAY_ALPHA", 176, 0, 255),
+            env_u32_range("CH347_DEBUG_OVERLAY_SCALE", 1, 1, 2),
+            debug_overlay_items_parse(getenv("CH347_DEBUG_OVERLAY_ITEMS")),
+            env_u32_range("CH347_DEBUG_OVERLAY_INTERVAL_MS", 1000, 250,
+                5000));
+}
+
+struct sink_runtime_config {
+    int debug;
+    int cursor_enabled;
+    enum frame_rotation rotation;
+    int overlay_enabled;
+    unsigned int overlay_alpha;
+    unsigned int overlay_scale;
+    unsigned int overlay_items;
+    unsigned int overlay_interval_ms;
+};
+
+static int parse_uint_text(const char *text, unsigned int minimum,
+        unsigned int maximum, unsigned int *value)
+{
+    char *end = NULL;
+    unsigned long parsed;
+
+    if (!text || !*text || !value)
+        return 0;
+    errno = 0;
+    parsed = strtoul(text, &end, 10);
+    if (errno || !end || (*end && *end != '\n' && *end != '\r') ||
+            parsed < minimum || parsed > maximum)
+        return 0;
+    *value = (unsigned int)parsed;
+    return 1;
+}
+
+static int read_uint_assignment(const char *path, const char *key,
+        unsigned int minimum, unsigned int maximum, unsigned int *value)
+{
+    FILE *stream;
+    char line[192];
+    size_t key_length;
+    int found = 0;
+    unsigned int selected = 0;
+
+    if (!path || !*path || !key || !*key || !value)
+        return 0;
+    stream = fopen(path, "r");
+    if (!stream)
+        return 0;
+    key_length = strlen(key);
+    while (fgets(line, sizeof(line), stream)) {
+        char *cursor = line;
+
+        while (*cursor == ' ' || *cursor == '\t')
+            cursor++;
+        if (!*cursor || *cursor == '\n' || *cursor == '#')
+            continue;
+        if (strncmp(cursor, key, key_length) != 0 ||
+                cursor[key_length] != '=')
+            continue;
+        if (found || !parse_uint_text(cursor + key_length + 1u, minimum,
+                    maximum, &selected)) {
+            fclose(stream);
+            return 0;
+        }
+        found = 1;
+    }
+    if (ferror(stream)) {
+        fclose(stream);
+        return 0;
+    }
+    fclose(stream);
+    if (!found)
+        return 0;
+    *value = selected;
+    return 1;
+}
+
+static int read_rotation_assignment(const char *path,
+        enum frame_rotation *rotation)
+{
+    FILE *stream;
+    char line[192];
+    char value[64];
+    int found = 0;
+    enum frame_rotation selected = FRAME_ROTATION_NORMAL;
+
+    if (!path || !*path || !rotation)
+        return 0;
+    stream = fopen(path, "r");
+    if (!stream)
+        return 0;
+    while (fgets(line, sizeof(line), stream)) {
+        char extra;
+        char *cursor = line;
+
+        while (*cursor == ' ' || *cursor == '\t')
+            cursor++;
+        if (!*cursor || *cursor == '\n' || *cursor == '#')
+            continue;
+        if (sscanf(cursor, "CH347_DISPLAY_ROTATION=%63[^\r\n]%c", value,
+                    &extra) < 1)
+            continue;
+        if (found || !frame_rotation_parse(value, &selected)) {
+            fclose(stream);
+            return 0;
+        }
+        found = 1;
+    }
+    if (ferror(stream)) {
+        fclose(stream);
+        return 0;
+    }
+    fclose(stream);
+    if (!found)
+        return 0;
+    *rotation = selected;
+    return 1;
+}
+
+static int sink_runtime_config_load(struct sink_runtime_config *config,
+        const char *fps_path, const char *overlay_path,
+        const char *cursor_path, const char *rotation_path)
+{
+    struct sink_runtime_config selected;
+    unsigned int value;
+
+    if (!config)
+        return 0;
+    selected = *config;
+    if (fps_path && *fps_path) {
+        if (!read_uint_assignment(fps_path, "DEBUG", 0, 1, &value))
+            return 0;
+        selected.debug = value != 0;
+    }
+    if (overlay_path && *overlay_path) {
+        if (!read_uint_assignment(overlay_path, "CH347_DEBUG_OVERLAY", 0, 1,
+                    &value))
+            return 0;
+        selected.overlay_enabled = value != 0;
+        if (!read_uint_assignment(overlay_path,
+                    "CH347_DEBUG_OVERLAY_ALPHA", 0, 255,
+                    &selected.overlay_alpha) ||
+                !read_uint_assignment(overlay_path,
+                    "CH347_DEBUG_OVERLAY_SCALE", 1, 2,
+                    &selected.overlay_scale) ||
+                !read_uint_assignment(overlay_path,
+                    "CH347_DEBUG_OVERLAY_ITEMS", 1, 31,
+                    &selected.overlay_items) ||
+                !read_uint_assignment(overlay_path,
+                    "CH347_DEBUG_OVERLAY_INTERVAL_MS", 250, 5000,
+                    &selected.overlay_interval_ms))
+            return 0;
+    }
+    if (cursor_path && *cursor_path) {
+        if (!read_uint_assignment(cursor_path, "CH347_CURSOR", 0, 1,
+                    &value))
+            return 0;
+        selected.cursor_enabled = value != 0;
+    }
+    if (rotation_path && *rotation_path &&
+            !read_rotation_assignment(rotation_path, &selected.rotation))
+        return 0;
+    *config = selected;
+    return 1;
 }
 
 static int debug_overlay_sample(struct debug_overlay_state *overlay,
@@ -3148,11 +3328,16 @@ int main(int argc, char **argv)
     double full_area_ratio = env_double("CH347_FULL_AREA_PCT", 40.0) / 100.0;
     int swap16 = env_u32("CH347_SWAP16", 0) != 0;
     int debug = env_u32("CH347_DEBUG", 0) != 0;
+    const char *fps_file = getenv("CH347_FPS_FILE");
+    const char *overlay_file = getenv("CH347_DEBUG_OVERLAY_FILE");
+    const char *cursor_file = getenv("CH347_CURSOR_FILE");
+    const char *rotation_file = getenv("CH347_ROTATION_FILE");
     int repeat_input = env_u32("CH347_REPEAT_INPUT", 0) != 0;
     int latest_only = env_u32("CH347_LATEST_ONLY", 1) != 0;
     struct touch_state touch;
     struct gpio_overlay_state gpio_overlay;
     struct debug_overlay_state debug_overlay;
+    struct sink_runtime_config runtime_config;
     struct slot *slots;
     struct rect rects[MAX_TILE_RECTS];
     struct rect send_list[MAX_TILE_RECTS];
@@ -3225,6 +3410,7 @@ int main(int argc, char **argv)
     if (!gpio_overlay.poll_ms)
         gpio_overlay.poll_ms = 1;
     debug_overlay_init(&debug_overlay);
+    signal(SIGUSR1, runtime_reload_signal);
 
     touch.enabled = env_u32("CH347_TOUCH", 0) != 0;
     touch.use_irq = env_u32("CH347_TOUCH_USE_IRQ", 1) != 0;
@@ -3283,6 +3469,15 @@ int main(int argc, char **argv)
         touch.height = LCD_HEIGHT;
     frame_rotation_output_size(touch.rotation, touch.width, touch.height,
             &touch.logical_width, &touch.logical_height);
+    memset(&runtime_config, 0, sizeof(runtime_config));
+    runtime_config.debug = debug;
+    runtime_config.cursor_enabled = touch.cursor_enabled;
+    runtime_config.rotation = touch.rotation;
+    runtime_config.overlay_enabled = debug_overlay.enabled;
+    runtime_config.overlay_alpha = debug_overlay.alpha;
+    runtime_config.overlay_scale = debug_overlay.scale;
+    runtime_config.overlay_items = debug_overlay.items;
+    runtime_config.overlay_interval_ms = debug_overlay.interval_ms;
     if (!touch.max_errors)
         touch.max_errors = 1;
     if (!touch.jump_thresh)
@@ -3513,7 +3708,48 @@ frame_loop:
         int gpio_changed = 0;
         int overlay_wakeup = 0;
         int overlay_updated = 0;
+        int control_changed = 0;
         int ret;
+
+        if (runtime_reload_requested) {
+            struct sink_runtime_config selected = runtime_config;
+
+            runtime_reload_requested = 0;
+            if (!sink_runtime_config_load(&selected, fps_file, overlay_file,
+                        cursor_file, rotation_file)) {
+                fprintf(stderr,
+                        "dirty_usb_sink control_reload rejected invalid config\n");
+            } else {
+                int rotation_changed = selected.rotation != touch.rotation;
+
+                if (rotation_changed) {
+                    if (touch.down)
+                        touch_release(&touch);
+                    touch.cursor_visible = 0;
+                    touch.rotation = selected.rotation;
+                    frame_rotation_output_size(touch.rotation, touch.width,
+                            touch.height, &touch.logical_width,
+                            &touch.logical_height);
+                    touch.filter_valid = 0;
+                    touch.raw_valid = 0;
+                }
+                debug = selected.debug;
+                touch.cursor_enabled = selected.cursor_enabled;
+                debug_overlay_configure(&debug_overlay,
+                        selected.overlay_enabled, selected.overlay_alpha,
+                        selected.overlay_scale, selected.overlay_items,
+                        selected.overlay_interval_ms);
+                runtime_config = selected;
+                control_changed = 1;
+                fprintf(stderr,
+                        "dirty_usb_sink control_reload debug_log=%d debug_overlay=%d overlay_alpha=%u overlay_scale=%u overlay_items=0x%x overlay_ms=%u cursor=%d rotation=%s logical=%ux%u\n",
+                        debug, debug_overlay.enabled, debug_overlay.alpha,
+                        debug_overlay.scale, debug_overlay.items,
+                        debug_overlay.interval_ms, touch.cursor_enabled,
+                        frame_rotation_name(touch.rotation),
+                        touch.logical_width, touch.logical_height);
+            }
+        }
         if (mailbox_mode) {
             int got = mailbox_copy_next(mailbox_mapping, mailbox_mapping_size,
                     frame, &consumed_seq, &captured_frames, &dropped_frames,
@@ -3557,6 +3793,7 @@ frame_loop:
             }
             overlay_wakeup = debug_overlay_due(&debug_overlay, now);
             if (!new_frame && !touch_changed && !gpio_changed &&
+                    !control_changed &&
                     !overlay_wakeup) {
                 struct timespec pause = {0, 1000000L};
 

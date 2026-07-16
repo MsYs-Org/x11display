@@ -119,6 +119,50 @@ static void read_fps_file(const char *path, double current_max_fps,
     *idle_fps_out = idle_fps;
 }
 
+static int read_rotation_file(const char *path,
+        enum frame_rotation current_rotation,
+        enum frame_rotation *rotation_out)
+{
+    FILE *stream;
+    char line[192];
+    enum frame_rotation selected = current_rotation;
+    int found = 0;
+
+    if (!rotation_out)
+        return 0;
+    *rotation_out = current_rotation;
+    if (!path || !*path)
+        return 1;
+    stream = fopen(path, "r");
+    if (!stream)
+        return 0;
+    while (fgets(line, sizeof(line), stream)) {
+        char value[64];
+        char extra;
+        char *cursor = line;
+
+        while (*cursor == ' ' || *cursor == '\t')
+            cursor++;
+        if (!*cursor || *cursor == '\n' || *cursor == '#')
+            continue;
+        if (sscanf(cursor, "CH347_DISPLAY_ROTATION=%63[^\r\n]%c", value,
+                    &extra) < 1)
+            continue;
+        if (found || !frame_rotation_parse(value, &selected)) {
+            fclose(stream);
+            return 0;
+        }
+        found = 1;
+    }
+    if (ferror(stream) || !found) {
+        fclose(stream);
+        return 0;
+    }
+    fclose(stream);
+    *rotation_out = selected;
+    return 1;
+}
+
 static void init_mask(struct mask_info *mi, unsigned long mask)
 {
     mi->mask = mask;
@@ -331,6 +375,36 @@ static XImage *create_shm_image(Display *dpy, Visual *visual, int depth,
     return img;
 }
 
+static XImage *create_capture_image(Display *dpy, Visual *visual, int depth,
+        unsigned int width, unsigned int height, int *use_shm,
+        XShmSegmentInfo *shm)
+{
+    XImage *image = NULL;
+
+    if (*use_shm)
+        image = create_shm_image(dpy, visual, depth, width, height, shm);
+    if (image)
+        return image;
+    *use_shm = 0;
+    memset(shm, 0, sizeof(*shm));
+    return XCreateImage(dpy, visual, (unsigned int)depth, ZPixmap, 0, NULL,
+            width, height, 32, 0);
+}
+
+static void destroy_capture_image(Display *dpy, XImage *image, int use_shm,
+        XShmSegmentInfo *shm)
+{
+    if (!image)
+        return;
+    if (use_shm) {
+        XShmDetach(dpy, shm);
+        XDestroyImage(image);
+        shmdt(shm->shmaddr);
+    } else {
+        XDestroyImage(image);
+    }
+}
+
 static int capture_frame(Display *dpy, Drawable root, XImage **fallback_img,
         XImage *shm_img, int use_shm, uint8_t *out,
         const struct mask_info *rm, const struct mask_info *gm,
@@ -448,6 +522,7 @@ int main(int argc, char **argv)
     const char *output_mode = getenv("XCAP_OUTPUT");
     const char *mailbox_path = getenv("XCAP_MAILBOX");
     const char *fps_file = getenv("XCAP_FPS_FILE");
+    const char *rotation_file = getenv("XCAP_ROTATION_FILE");
     const char *rotation_text = getenv("XCAP_ROTATION");
     enum frame_rotation rotation;
     int output_rects = !output_mode || !strcmp(output_mode, "rects");
@@ -540,17 +615,12 @@ int main(int argc, char **argv)
     }
 
     use_shm = XShmQueryExtension(dpy);
-    img = use_shm ? create_shm_image(dpy, visual, depth, width, height, &shm) :
-        NULL;
+    img = create_capture_image(dpy, visual, depth, width, height, &use_shm,
+            &shm);
     if (!img) {
-        use_shm = 0;
-        img = XCreateImage(dpy, visual, (unsigned int)depth, ZPixmap, 0, NULL,
-                width, height, 32, 0);
-        if (!img) {
-            fprintf(stderr, "xdamage_capture cannot create XImage\n");
-            XCloseDisplay(dpy);
-            return 1;
-        }
+        fprintf(stderr, "xdamage_capture cannot create XImage\n");
+        XCloseDisplay(dpy);
+        return 1;
     }
 
     out = malloc(frame_bytes);
@@ -656,9 +726,18 @@ int main(int argc, char **argv)
         if (reload_requested || now - last_control_poll >= 0.25) {
             double new_max_fps;
             double new_idle_fps;
+            enum frame_rotation new_rotation = rotation;
+            int explicit_reload = reload_requested != 0;
 
             read_fps_file(fps_file, max_fps, idle_fps, &new_max_fps,
                     &new_idle_fps);
+            if (explicit_reload &&
+                    !read_rotation_file(rotation_file, rotation,
+                        &new_rotation)) {
+                fprintf(stderr,
+                        "xdamage_capture rotation reload rejected invalid config\n");
+                new_rotation = rotation;
+            }
 
             last_control_poll = now;
             reload_requested = 0;
@@ -675,6 +754,87 @@ int main(int argc, char **argv)
                 if (debug)
                     fprintf(stderr, "xdamage_capture idle_fps=%.1f (live)\n",
                             idle_fps);
+            }
+            if (new_rotation != rotation) {
+                unsigned int new_width;
+                unsigned int new_height;
+                unsigned int checked_output_width;
+                unsigned int checked_output_height;
+                XWindowAttributes root_attributes;
+                int new_use_shm = XShmQueryExtension(dpy);
+                XShmSegmentInfo new_shm;
+                XImage *new_image;
+                uint8_t *new_capture_buffer;
+
+                if (new_rotation == FRAME_ROTATION_RIGHT ||
+                        new_rotation == FRAME_ROTATION_LEFT) {
+                    new_width = output_height;
+                    new_height = output_width;
+                } else {
+                    new_width = output_width;
+                    new_height = output_height;
+                }
+                frame_rotation_output_size(new_rotation, new_width,
+                        new_height, &checked_output_width,
+                        &checked_output_height);
+                if (checked_output_width != output_width ||
+                        checked_output_height != output_height ||
+                        !XGetWindowAttributes(dpy, root, &root_attributes) ||
+                        root_attributes.width != (int)new_width ||
+                        root_attributes.height != (int)new_height) {
+                    fprintf(stderr,
+                            "xdamage_capture rotation reload deferred rotation=%s expected_root=%ux%u\n",
+                            frame_rotation_name(new_rotation), new_width,
+                            new_height);
+                } else if (output_rects &&
+                        new_rotation != FRAME_ROTATION_NORMAL) {
+                    fprintf(stderr,
+                            "xdamage_capture rotation reload requires frame output\n");
+                } else {
+                    new_image = create_capture_image(dpy, visual, depth,
+                            new_width, new_height, &new_use_shm, &new_shm);
+                    new_capture_buffer =
+                        new_rotation == FRAME_ROTATION_NORMAL ? out :
+                        malloc(frame_bytes);
+                    if (!new_image || !new_capture_buffer) {
+                        if (new_image)
+                            destroy_capture_image(dpy, new_image, new_use_shm,
+                                    &new_shm);
+                        if (new_capture_buffer && new_capture_buffer != out)
+                            free(new_capture_buffer);
+                        fprintf(stderr,
+                                "xdamage_capture rotation reload allocation failed\n");
+                    } else {
+                        if (fallback_img) {
+                            XDestroyImage(fallback_img);
+                            fallback_img = NULL;
+                        }
+                        destroy_capture_image(dpy, img, use_shm, &shm);
+                        if (capture_buffer != out)
+                            free(capture_buffer);
+                        img = new_image;
+                        shm = new_shm;
+                        use_shm = new_use_shm;
+                        capture_buffer = new_capture_buffer;
+                        width = new_width;
+                        height = new_height;
+                        rotation = new_rotation;
+                        init_mask(&rm, img->red_mask);
+                        init_mask(&gm, img->green_mask);
+                        init_mask(&bm, img->blue_mask);
+                        dirty = 1;
+                        have_pending = 1;
+                        pending.x = 0;
+                        pending.y = 0;
+                        pending.w = width;
+                        pending.h = height;
+                        force_refresh_requested = 1;
+                        fprintf(stderr,
+                                "xdamage_capture rotation=%s input=%ux%u output=%ux%u shm=%d (live)\n",
+                                frame_rotation_name(rotation), width, height,
+                                output_width, output_height, use_shm);
+                    }
+                }
             }
         }
 
@@ -784,13 +944,7 @@ wait_for_work:
         XDamageDestroy(dpy, damage);
     if (fallback_img)
         XDestroyImage(fallback_img);
-    if (use_shm) {
-        XShmDetach(dpy, &shm);
-        XDestroyImage(img);
-        shmdt(shm.shmaddr);
-    } else {
-        XDestroyImage(img);
-    }
+    destroy_capture_image(dpy, img, use_shm, &shm);
     if (mailbox) {
         struct frame_mailbox_header *header = mailbox;
 
