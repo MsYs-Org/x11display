@@ -123,8 +123,11 @@ unchanged.
 Overlay presentation is bounded by `CH347_DEBUG_OVERLAY_ALPHA=0..255` and
 `CH347_DEBUG_OVERLAY_SCALE=1|2`; the compact 1x font is the default. Select
 comma-separated rows with `CH347_DEBUG_OVERLAY_ITEMS`: `fps`, `dirty`,
-`bytes`, `bbox`, and `memory`. `memory` is explicitly the sink process's
-current RSS, not whole-system memory. The default rows are `fps,dirty,bytes`.
+`bytes`, `bbox`, `memory`, and `cpu`. `memory` is explicitly the sink process's
+current RSS, not whole-system memory. `cpu` samples aggregate `/proc/stat`
+counter deltas at the existing overlay interval; its first or invalid sample
+is `CPU:--`, then it reports a clamped `0..100%`. Guest counters are not
+double-counted. The default rows are `fps,dirty,bytes,cpu`.
 
 When the full-frame mailbox or latest-frame condition-wait path is idle, an
 enabled visible overlay uses its interval as a maximum wake-up delay and sends

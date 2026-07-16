@@ -9,6 +9,15 @@
 #include "../src/ch347_dirty_usb_sink.c"
 #undef main
 
+static void write_cpu_stat(const char *path, const char *line)
+{
+    FILE *stream = fopen(path, "w");
+
+    assert(stream != NULL);
+    assert(fputs(line, stream) >= 0);
+    assert(fclose(stream) == 0);
+}
+
 int main(void)
 {
     const size_t mapping_size = frame_mailbox_size(FRAME_BYTES);
@@ -32,7 +41,9 @@ int main(void)
     unsigned int overlay_damage_count;
     size_t overlay_dirty_area;
     char runtime_path[] = "/tmp/msys-sink-runtime-XXXXXX";
+    char cpu_stat_path[] = "/tmp/msys-sink-cpu-stat-XXXXXX";
     int runtime_fd;
+    int cpu_stat_fd;
     FILE *runtime_stream;
     struct sink_runtime_config runtime = {
         .debug = 0,
@@ -122,6 +133,11 @@ int main(void)
     assert(setenv("CH347_DEBUG_OVERLAY_ITEMS", "all", 1) == 0);
     assert(setenv("CH347_DEBUG_OVERLAY_INTERVAL_MS", "250", 1) == 0);
     debug_overlay_init(&overlay);
+    assert(DEBUG_OVERLAY_ALL_ITEMS == 63);
+    assert(overlay.items == 63);
+    assert(overlay.line_count == 6);
+    assert(overlay.bounds.x0 == 0 && overlay.bounds.y0 == 0);
+    assert(overlay.bounds.x1 == 129 && overlay.bounds.y1 == 57);
     assert(debug_overlay_due(&overlay, 1.0));
     assert(idle_wake_interval_ms(0, 0, 0, 0, &overlay, 1.0) == 1);
     assert(idle_wake_interval_ms(1, 20, 0, 0, &overlay, 1.0) == 1);
@@ -133,17 +149,30 @@ int main(void)
     metrics.sent_pixels = 4096;
     metrics.bbox = measured[1];
     metrics.bbox_valid = 1;
+    cpu_stat_fd = mkstemp(cpu_stat_path);
+    assert(cpu_stat_fd >= 0);
+    assert(close(cpu_stat_fd) == 0);
+    write_cpu_stat(cpu_stat_path,
+            "cpu 100 20 30 400 50 10 5 2 999 999\n"
+            "cpu0 1 2 3 4 5 6 7 8 9 10\n");
+    overlay.cpu_stat_path = cpu_stat_path;
     assert(debug_overlay_sample(&overlay, &metrics, 1.0));
-    assert(overlay.line_count == 5);
+    assert(overlay.line_count == 6);
     assert(strstr(overlay.lines[0], "C:59.5") != NULL);
     assert(strstr(overlay.lines[2], "B:4096") != NULL);
     assert(strstr(overlay.lines[3], "Q:20,30-24,33") != NULL);
     assert(strstr(overlay.lines[4], "SINK RSS:") != NULL);
+    assert(strcmp(overlay.lines[5], "CPU:--") == 0);
+    assert(overlay.cpu.sample_count == 1);
+    assert(overlay.cpu.previous_total == 617);
+    assert(overlay.cpu.previous_idle == 450);
+    assert(overlay.cpu.baseline_valid && !overlay.cpu.percent_valid);
     memset(frame, 0xff, FRAME_BYTES);
     draw_debug_overlay(frame, &overlay);
     assert(frame[0] != 0xff || frame[1] != 0xff);
     assert(frame[((size_t)LCD_HEIGHT - 1) * STRIDE_BYTES] == 0xff);
     assert(!debug_overlay_sample(&overlay, &metrics, 1.20));
+    assert(overlay.cpu.sample_count == 1);
     assert(!debug_overlay_due(&overlay, 1.20));
     {
         unsigned int overlay_wait = idle_wake_interval_ms(0, 0, 0, 0,
@@ -153,7 +182,18 @@ int main(void)
     }
     assert(idle_wake_interval_ms(1, 20, 0, 0, &overlay, 1.20) == 20);
     assert(debug_overlay_due(&overlay, 1.25));
+    write_cpu_stat(cpu_stat_path,
+            "cpu 120 20 40 450 50 10 5 5 5000 6000\n");
     assert(debug_overlay_sample(&overlay, &metrics, 1.26));
+    assert(overlay.cpu.sample_count == 2);
+    assert(overlay.cpu.percent_valid);
+    assert(overlay.cpu.percent > 39.7 && overlay.cpu.percent < 39.9);
+    assert(strcmp(overlay.lines[5], "CPU:39.8%") == 0);
+    write_cpu_stat(cpu_stat_path, "not-cpu malformed\n");
+    assert(debug_overlay_sample(&overlay, &metrics, 1.52));
+    assert(!overlay.cpu.baseline_valid && !overlay.cpu.percent_valid);
+    assert(strcmp(overlay.lines[5], "CPU:--") == 0);
+    assert(unlink(cpu_stat_path) == 0);
 
     overlay_damage[0] = measured[0];
     overlay_damage[1] = (struct rect){250, 400, 259, 409};
@@ -220,6 +260,7 @@ int main(void)
     assert(setenv("CH347_DEBUG_OVERLAY_ITEMS", "unknown", 1) == 0);
     debug_overlay_init(&overlay);
     assert(overlay.items == DEBUG_OVERLAY_DEFAULT_ITEMS);
+    assert(overlay.items == 39);
     assert(reset_usb_device("relative") == 64);
     assert(reset_usb_device("/dev/null") == 1);
 

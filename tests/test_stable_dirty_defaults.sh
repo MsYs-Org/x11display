@@ -41,6 +41,16 @@ expect_fixed_default scripts/start_ch347_dirty_usb_x11.sh \
 expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
     'CH347_DEBUG_OVERLAY="${CH347_DEBUG_OVERLAY:-0}"'
 
+# Debug remains opt-in, while the opt-in default view includes aggregate CPU.
+# Extending the overlay must not alter the stable dirty selector above.
+expect_fixed_default ch347/debug_overlay.env 'CH347_DEBUG_OVERLAY_ITEMS=39'
+expect_fixed_default scripts/start_ch347_dirty_usb_x11.sh \
+    'CH347_DEBUG_OVERLAY_ITEMS="${CH347_DEBUG_OVERLAY_ITEMS:-fps,dirty,bytes,cpu}"'
+expect_fixed_default scripts/ch347_dirty_usb_x11_daemon.sh \
+    'CH347_DEBUG_OVERLAY_ITEMS="${CH347_DEBUG_OVERLAY_ITEMS:-fps,dirty,bytes,cpu}"'
+expect_fixed_default scripts/ch347_display_config.sh \
+    'ch347_config_uint "$value" 1 63 || return 1'
+
 # Touch input is independent from panel damage.  A visible LCD-side cursor is
 # useful for calibration/debugging only and must remain an explicit opt-in.
 expect_fixed_default src/ch347_dirty_usb_sink.c \

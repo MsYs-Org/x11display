@@ -92,9 +92,12 @@ struct rect {
 #define DEBUG_OVERLAY_BYTES (1u << 2)
 #define DEBUG_OVERLAY_BBOX (1u << 3)
 #define DEBUG_OVERLAY_MEMORY (1u << 4)
+#define DEBUG_OVERLAY_CPU (1u << 5)
+#define DEBUG_OVERLAY_ALL_ITEMS ((1u << 6) - 1u)
 #define DEBUG_OVERLAY_DEFAULT_ITEMS \
-    (DEBUG_OVERLAY_FPS | DEBUG_OVERLAY_DIRTY | DEBUG_OVERLAY_BYTES)
-#define DEBUG_OVERLAY_MAX_LINES 5
+    (DEBUG_OVERLAY_FPS | DEBUG_OVERLAY_DIRTY | DEBUG_OVERLAY_BYTES | \
+        DEBUG_OVERLAY_CPU)
+#define DEBUG_OVERLAY_MAX_LINES 6
 #define DEBUG_OVERLAY_LINE_CAPACITY 48
 
 static volatile sig_atomic_t runtime_reload_requested;
@@ -116,6 +119,16 @@ struct debug_overlay_metrics {
     int bbox_valid;
 };
 
+struct cpu_usage_state {
+    uint64_t previous_total;
+    uint64_t previous_idle;
+    double percent;
+    unsigned int sample_count;
+    int baseline_valid;
+    int percent_valid;
+    int log_state;
+};
+
 struct debug_overlay_state {
     int enabled;
     unsigned int alpha;
@@ -126,6 +139,8 @@ struct debug_overlay_state {
     unsigned int line_count;
     char lines[DEBUG_OVERLAY_MAX_LINES][DEBUG_OVERLAY_LINE_CAPACITY];
     struct rect bounds;
+    struct cpu_usage_state cpu;
+    const char *cpu_stat_path;
 };
 
 struct reader_state {
@@ -380,9 +395,7 @@ static unsigned int debug_overlay_items_parse(const char *value)
         if (!*token)
             return DEBUG_OVERLAY_DEFAULT_ITEMS;
         if (strcmp(token, "all") == 0)
-            items |= DEBUG_OVERLAY_FPS | DEBUG_OVERLAY_DIRTY |
-                DEBUG_OVERLAY_BYTES | DEBUG_OVERLAY_BBOX |
-                DEBUG_OVERLAY_MEMORY;
+            items |= DEBUG_OVERLAY_ALL_ITEMS;
         else if (strcmp(token, "none") == 0)
             items = 0;
         else if (strcmp(token, "fps") == 0)
@@ -395,6 +408,8 @@ static unsigned int debug_overlay_items_parse(const char *value)
             items |= DEBUG_OVERLAY_BBOX;
         else if (strcmp(token, "memory") == 0)
             items |= DEBUG_OVERLAY_MEMORY;
+        else if (strcmp(token, "cpu") == 0)
+            items |= DEBUG_OVERLAY_CPU;
         else
             return DEBUG_OVERLAY_DEFAULT_ITEMS;
     }
@@ -2105,6 +2120,107 @@ static unsigned long sink_rss_kib(void)
     return resident_pages * (unsigned long)page_size / 1024u;
 }
 
+static int cpu_usage_read_counters(const char *path, uint64_t *total,
+        uint64_t *idle_total)
+{
+    FILE *stream;
+    char line[512];
+    char name[8];
+    unsigned long long user = 0;
+    unsigned long long nice = 0;
+    unsigned long long system = 0;
+    unsigned long long idle = 0;
+    unsigned long long iowait = 0;
+    unsigned long long irq = 0;
+    unsigned long long softirq = 0;
+    unsigned long long steal = 0;
+    int fields;
+
+    if (!path || !*path || !total || !idle_total)
+        return 0;
+    stream = fopen(path, "r");
+    if (!stream)
+        return 0;
+    if (!fgets(line, sizeof(line), stream)) {
+        fclose(stream);
+        return 0;
+    }
+    fclose(stream);
+    fields = sscanf(line, "%7s %llu %llu %llu %llu %llu %llu %llu %llu",
+            name, &user, &nice, &system, &idle, &iowait, &irq, &softirq,
+            &steal);
+    if (fields != 9 || strcmp(name, "cpu") != 0)
+        return 0;
+
+    /* /proc/stat appends guest and guest_nice after steal. They are already
+     * included in user/nice and must not be counted a second time. */
+    *total = (uint64_t)user + (uint64_t)nice + (uint64_t)system +
+        (uint64_t)idle + (uint64_t)iowait + (uint64_t)irq +
+        (uint64_t)softirq + (uint64_t)steal;
+    *idle_total = (uint64_t)idle + (uint64_t)iowait;
+    return 1;
+}
+
+static void cpu_usage_log_transition(struct cpu_usage_state *state,
+        int next_state, double percent)
+{
+    if (state->log_state == next_state)
+        return;
+    state->log_state = next_state;
+    if (next_state == 1)
+        fprintf(stderr, "debug_overlay_cpu state=baseline source=/proc/stat\n");
+    else if (next_state == 2)
+        fprintf(stderr, "debug_overlay_cpu state=ready usage=%.1f\n",
+                percent);
+    else
+        fprintf(stderr, "debug_overlay_cpu state=unavailable source=/proc/stat\n");
+}
+
+static int cpu_usage_sample(struct cpu_usage_state *state, const char *path)
+{
+    uint64_t total;
+    uint64_t idle_total;
+    uint64_t total_delta;
+    uint64_t idle_delta;
+    double percent;
+
+    if (!state || !cpu_usage_read_counters(path, &total, &idle_total)) {
+        if (state) {
+            state->baseline_valid = 0;
+            state->percent_valid = 0;
+            cpu_usage_log_transition(state, 3, 0.0);
+        }
+        return 0;
+    }
+    state->sample_count++;
+    if (!state->baseline_valid || total <= state->previous_total ||
+            idle_total < state->previous_idle) {
+        state->previous_total = total;
+        state->previous_idle = idle_total;
+        state->baseline_valid = 1;
+        state->percent_valid = 0;
+        cpu_usage_log_transition(state, 1, 0.0);
+        return 0;
+    }
+
+    total_delta = total - state->previous_total;
+    idle_delta = idle_total - state->previous_idle;
+    state->previous_total = total;
+    state->previous_idle = idle_total;
+    if (idle_delta > total_delta)
+        idle_delta = total_delta;
+    percent = (double)(total_delta - idle_delta) * 100.0 /
+        (double)total_delta;
+    if (percent < 0.0)
+        percent = 0.0;
+    else if (percent > 100.0)
+        percent = 100.0;
+    state->percent = percent;
+    state->percent_valid = 1;
+    cpu_usage_log_transition(state, 2, percent);
+    return 1;
+}
+
 static unsigned int debug_overlay_max_chars(unsigned int items)
 {
     unsigned int width = 0;
@@ -2119,6 +2235,8 @@ static unsigned int debug_overlay_max_chars(unsigned int items)
         width = 19;
     if ((items & DEBUG_OVERLAY_MEMORY) && width < 16)
         width = 16;
+    if ((items & DEBUG_OVERLAY_CPU) && width < 10)
+        width = 10;
     return width;
 }
 
@@ -2137,6 +2255,7 @@ static void debug_overlay_configure(struct debug_overlay_state *overlay,
     overlay->scale = scale;
     overlay->interval_ms = interval_ms;
     overlay->items = items;
+    overlay->cpu_stat_path = "/proc/stat";
     for (unsigned int bit = 0; bit < DEBUG_OVERLAY_MAX_LINES; bit++)
         if (overlay->items & (1u << bit))
             lines++;
@@ -2312,7 +2431,7 @@ static int sink_runtime_config_load(struct sink_runtime_config *config,
                     "CH347_DEBUG_OVERLAY_SCALE", 1, 2,
                     &selected.overlay_scale) ||
                 !read_uint_assignment(overlay_path,
-                    "CH347_DEBUG_OVERLAY_ITEMS", 1, 31,
+                    "CH347_DEBUG_OVERLAY_ITEMS", 1, 63,
                     &selected.overlay_items) ||
                 !read_uint_assignment(overlay_path,
                     "CH347_DEBUG_OVERLAY_INTERVAL_MS", 250, 5000,
@@ -2344,6 +2463,8 @@ static int debug_overlay_sample(struct debug_overlay_state *overlay,
             (double)overlay->interval_ms / 1000.0)
         return 0;
     overlay->last_sample = now;
+    if (overlay->items & DEBUG_OVERLAY_CPU)
+        (void)cpu_usage_sample(&overlay->cpu, overlay->cpu_stat_path);
     if (overlay->items & DEBUG_OVERLAY_FPS)
         snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
                 "C:%04.1f P:%04.1f", metrics->capture_fps,
@@ -2368,6 +2489,14 @@ static int debug_overlay_sample(struct debug_overlay_state *overlay,
     if (overlay->items & DEBUG_OVERLAY_MEMORY)
         snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
                 "SINK RSS:%luK", sink_rss_kib());
+    if (overlay->items & DEBUG_OVERLAY_CPU) {
+        if (overlay->cpu.percent_valid)
+            snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
+                    "CPU:%.1f%%", overlay->cpu.percent);
+        else
+            snprintf(overlay->lines[line++], DEBUG_OVERLAY_LINE_CAPACITY,
+                    "CPU:--");
+    }
     overlay->line_count = line;
     return 1;
 }

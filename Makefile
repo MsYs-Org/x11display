@@ -44,6 +44,7 @@ $(BIN)/test_mailbox_prefetch: tests/test_mailbox_prefetch.c \
 test: $(BIN)/test_frame_rotation $(BIN)/test_mailbox_prefetch
 	$(BIN)/test_frame_rotation
 	$(BIN)/test_mailbox_prefetch
+	bash tests/test_debug_overlay_config.sh
 	sh tests/test_stable_dirty_defaults.sh
 
 integration-test: $(BIN)/xdamage_shm_capture
