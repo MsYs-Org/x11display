@@ -61,6 +61,33 @@ Restoring the old `PropertyNotify` fallback or removing mailbox de-duplication
 would reintroduce unrelated full-screen refreshes, so those capture-side changes
 are not part of the dirty-policy rollback.
 
+## X11 frame-commit boundary
+
+The mailbox transport is an atomic publication boundary, but it is not an X11
+render transaction. `xdamage_shm_capture` completes `XShmGetImage`, converts a
+whole root image, copies the result into an inactive mailbox slot, then publishes
+that slot with release-ordered `slot_seq` and `published_seq` stores. The sink
+checks the sequence before and after its copy. It therefore cannot read a slot
+while the producer is writing it.
+
+This does not make several client-side drawing requests one frame. A partial
+renderer can issue multiple `XPutImage` requests and flush between them; root
+XDamage and an ordinary X11 screenshot are both allowed to observe that
+intermediate server state. Capturing such a state is not mailbox tearing, an SPI
+vblank problem, or a dirty-rectangle error.
+
+The required transaction boundary belongs to the renderer:
+
+- compose a logical frame off-screen;
+- commit it to the visible window with one server-visible copy/present;
+- map a new surface only after its first committed frame;
+- let lifecycle `surface-ready` follow that mapped, committed surface.
+
+Do not add a fixed-rate refresh or a capture-side settle delay to mask a missing
+renderer commit. Such a delay cannot prove frame completeness, adds interaction
+latency, and would change the stable event-driven capture policy. The existing
+mailbox and single-bbox dirty behavior must remain unchanged.
+
 ## Regression check
 
 `tests/test_stable_dirty_defaults.sh` keeps the configuration file, both launch
